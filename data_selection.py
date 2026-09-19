@@ -1,29 +1,61 @@
-from pathlib import Path
-import re
-import tqdm
-import os
+"""Extract the smbdataset PNG metadata once for fast repeated preparation."""
 
-DATA_DIR = Path("D:\\Downloads\\Compressed\\data")
-OUTPUT_DIR = Path(__file__).parent / "processed_data"
+import argparse
+import json
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from tfm4mario.metadata_cache import build_cache
+
+DEFAULT_DATA = Path(r"D:\Downloads\Compressed\data")
+DEFAULT_OUTPUT = Path(__file__).parent / "processed_data" / "metadata_cache"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Cache the RAM, controller, outcome, and identity metadata from smbdataset PNGs"
+    )
+    parser.add_argument(
+        "--data",
+        type=Path,
+        default=DEFAULT_DATA,
+        help=f"Extracted smbdataset directory (default: {DEFAULT_DATA})",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help=f"NPZ cache directory (default: {DEFAULT_OUTPUT})",
+    )
+    parser.add_argument(
+        "--outcome",
+        choices=["win", "fail", "all"],
+        default="win",
+        help="Episodes to cache (default: win)",
+    )
+    parser.add_argument(
+        "--ram-encoding", choices=["dataset-cr", "raw"], default="dataset-cr"
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        help="Concurrent PNG readers (default: based on CPU count)",
+    )
+    args = parser.parse_args()
+    if args.workers is not None and args.workers < 1:
+        parser.error("--workers must be positive")
+    return args
 
 
 if __name__ == "__main__":
-    wins = 0
-    for folder in tqdm.tqdm(
-        DATA_DIR.iterdir(), desc="Processing folders", unit="folder"
-    ):
-        if folder.is_dir():
-            name = folder.name
-            result = name.split("_")[-1]
-            if result == "win":
-                # Copy the folder to the output directory
-                wins += 1
-                new_path = OUTPUT_DIR / name
-                new_path.mkdir(parents=True, exist_ok=True)
-                for item in folder.iterdir():
-                    if item.is_file():
-                        new_item_path = new_path / item.name
-                        if not new_item_path.exists():
-                            os.link(item, new_item_path)
-
-    print(f"Processed {wins} winning trajectories.")
+    args = parse_args()
+    result = build_cache(
+        args.data,
+        args.output,
+        outcome=args.outcome,
+        encoding=args.ram_encoding,
+        workers=args.workers,
+    )
+    print(json.dumps(result, indent=2))

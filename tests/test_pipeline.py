@@ -14,7 +14,14 @@ from tfm4mario.actions import button_names, to_nes_action, validate_action
 from tfm4mario.dataset import load_table, prepare
 from tfm4mario.features import FEATURE_NAMES, extract_features, feature_dict, tile_at
 from tfm4mario.game import rollout
-from tfm4mario.ram import PNG_SIGNATURE, decode_ram, parse_frame, read_frame
+from tfm4mario.metadata_cache import build_cache
+from tfm4mario.ram import (
+    PNG_SIGNATURE,
+    OutcomeMismatchError,
+    decode_ram,
+    parse_frame,
+    read_frame,
+)
 from tfm4mario.cli import parse_args
 
 
@@ -52,7 +59,10 @@ class RamTests(unittest.TestCase):
             path.write_bytes(png_bytes(ram, 148))
             np.testing.assert_array_equal(read_frame(parse_frame(path)), ram)
             path.write_bytes(png_bytes(ram, 20))
-            with self.assertRaisesRegex(ValueError, "mismatch"):
+            with self.assertRaisesRegex(ValueError, "BP1"):
+                read_frame(parse_frame(path))
+            path.write_bytes(png_bytes(ram, 148, outcome=1))
+            with self.assertRaises(OutcomeMismatchError):
                 read_frame(parse_frame(path))
 
 
@@ -95,6 +105,8 @@ class FeatureTests(unittest.TestCase):
         ram[0x6D], ram[0x86], ram[0xCE] = 1, 8, 80
         ram[0x71A] = 1
         ram[0x57], ram[0x9F] = 255, 128
+        ram[0x7F8:0x7FB] = [3, 9, 8]
+        ram[0x7A0] = 4
         ram[0x0F], ram[0x16], ram[0x6E], ram[0x87] = 1, 6, 1, 40
         ram[0xB6], ram[0xCF] = 1, 64
         ram[0x5D0 + 16 * 3] = 42
@@ -102,6 +114,8 @@ class FeatureTests(unittest.TestCase):
         self.assertEqual(features["player_speed_x_raw"], -1)
         self.assertEqual(features["player_speed_y_raw"], -128)
         self.assertEqual(features["player_screen_x"], 8)
+        self.assertEqual(features["game_timer"], 398)
+        self.assertEqual(features["screen_timer"], 4)
         self.assertEqual(features["object_0_dx"], 32)
         self.assertEqual(features["object_0_dy"], -16)
         self.assertEqual(features["tile_row_3_dx_0"], 42)
@@ -114,7 +128,7 @@ class FeatureTests(unittest.TestCase):
         ram = game_ram()
         before = extract_features(ram)
         for address in [0x0A, 0x0B, 0x0C, 0x0D, 0x6FC, 0x6FD, 0x74A, 0x758,
-                        0x09, 0x75C, 0x75F, 0x7DD, 0x7F8]:
+                        0x09, 0x75C, 0x75F, 0x7DD]:
             ram[address] = 255
         np.testing.assert_array_equal(before, extract_features(ram))
         self.assertEqual(len(before), len(FEATURE_NAMES))
@@ -146,10 +160,89 @@ class DatasetTests(unittest.TestCase):
             np.testing.assert_array_equal(X[:, FEATURE_NAMES.index("player_subtile_x")], [9, 10, 9, 10])
             self.assertEqual(meta["trajectory_count"], 2)
             self.assertEqual(meta["skipped"]["missing_target_frame"], 4)
+            self.assertEqual(meta["priority_rows"], 4)
             for path, original in originals.items():
                 self.assertEqual(path.read_bytes(), original)
             with self.assertRaises(FileExistsError):
                 prepare(data, output)
+
+    def test_npz_metadata_cache_matches_png_preparation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            for episode in [0, 1]:
+                for number, action in [(9, 0), (10, 20), (11, 148)]:
+                    ram = game_ram()
+                    ram[0x86] = number
+                    path = data / f"p_s_e{episode}_1-1_f{number}_a{action}_date.win.png"
+                    path.write_bytes(png_bytes(ram, action))
+            bad = data / "p_s_e2_1-1_f1_a0_date.fail.png"
+            bad.write_bytes(png_bytes(game_ram(), 0, outcome=2))
+            direct = root / "direct.npz"
+            cached = root / "cached.npz"
+            cache = root / "metadata-cache"
+            prepare(data, direct, stride=1, max_rows=100, label_offset=1)
+            result = build_cache(data, cache, outcome="all", workers=2)
+            resumed = build_cache(data, cache, outcome="all", workers=2)
+            prepare(cache, cached, stride=1, max_rows=100, label_offset=1)
+            direct_x, direct_y, direct_meta = load_table(direct)
+            cached_x, cached_y, cached_meta = load_table(cached)
+            np.testing.assert_array_equal(cached_x, direct_x)
+            np.testing.assert_array_equal(cached_y, direct_y)
+            self.assertEqual(result["frames"], 6)
+            self.assertEqual(len(result["skipped_trajectories"]), 1)
+            self.assertEqual(result["skipped_trajectories"][0]["episode"], "p_s_e2_1-1")
+            self.assertEqual(resumed["new_shards"], 0)
+            self.assertEqual(cached_meta["source_format"], "npz-cache")
+            self.assertEqual(direct_meta["source_format"], "png")
+            with np.load(next(cache.glob("*.npz")), allow_pickle=False) as shard:
+                self.assertEqual(set(shard.files), {"ram", "actions", "frames", "paths", "metadata"})
+
+    def test_explicit_level_exclusion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            for level in ("1-1", "8-4"):
+                for number, action in ((1, 20), (2, 148)):
+                    ram = game_ram()
+                    world, stage = level.split("-")
+                    path = data / f"p_s_e{world}{stage}_{level}_f{number}_a{action}_date.win.png"
+                    path.write_bytes(png_bytes(ram, action))
+            output = root / "context.npz"
+            metadata = prepare(data, output, stride=1, max_rows=100,
+                               label_offset=0, exclude_level="8-4")
+            _, _, loaded = load_table(output)
+            self.assertEqual(metadata["levels"], ["1-1"])
+            self.assertEqual(loaded["excluded_level"], "8-4")
+            self.assertNotIn("8-4", loaded["levels"])
+            with self.assertRaisesRegex(ValueError, "exclude_level"):
+                prepare(data, root / "bad.npz", exclude_level="world-8")
+
+    def test_opening_rows_are_preserved_before_reservoir_sampling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            for episode in range(2):
+                for number in range(1, 21):
+                    ram = game_ram()
+                    ram[0x86] = number
+                    action = 20 if number > 4 else 0
+                    path = data / f"p_s_e{episode}_1-1_f{number}_a{action}_date.win.png"
+                    path.write_bytes(png_bytes(ram, action))
+            output = root / "context.npz"
+            metadata = prepare(data, output, stride=1, max_rows=8, label_offset=0,
+                               head_rows_per_trajectory=2)
+            _, _, loaded = load_table(output)
+            with np.load(output, allow_pickle=False) as table:
+                selected = list(zip(table["episodes"].tolist(), table["frames"].tolist()))
+            for episode in ("p_s_e0_1-1", "p_s_e1_1-1"):
+                self.assertIn((episode, 1), selected)
+                self.assertIn((episode, 2), selected)
+            self.assertEqual(metadata["priority_rows"], 4)
+            self.assertEqual(loaded["effective_head_rows_per_trajectory"], 2)
 
 
 class ActionAndRolloutTests(unittest.TestCase):
@@ -177,7 +270,7 @@ class ActionAndRolloutTests(unittest.TestCase):
                 return None, 1.0, len(self.actions) == 2, False, {"flag_get": len(self.actions) == 2}
 
         class Policy:
-            def predict_ram(self, ram):
+            def predict_ram(self, ram, **kwargs):
                 return {"action": 148, "predict_seconds": .01, "buttons": ["A", "B", "right"]}
 
         env = Env()
@@ -188,6 +281,38 @@ class ActionAndRolloutTests(unittest.TestCase):
         self.assertEqual(result["decisions"], 1)
         self.assertTrue(result["flag_get"])
         self.assertEqual(json.loads(trace.getvalue())["action"], 148)
+
+    def test_video_receives_initial_and_stepped_frames(self):
+        class Env:
+            unwrapped = property(lambda self: self)
+            ram = game_ram()
+
+            def reset(self, seed=None):
+                self.steps = 0
+                return None, {}
+
+            def step(self, action):
+                self.steps += 1
+                return None, 0.0, self.steps == 2, False, {}
+
+            def render(self):
+                return np.full((4, 5, 3), self.steps, dtype=np.uint8)
+
+        class Policy:
+            def predict_ram(self, ram, **kwargs):
+                return {"action": 0, "predict_seconds": 0.0, "buttons": []}
+
+        class Video:
+            def __init__(self):
+                self.frames = []
+
+            def write(self, frame):
+                self.frames.append(frame.copy())
+
+        video = Video()
+        result = rollout(Env(), Policy(), max_frames=5, video=video)
+        self.assertEqual(result["frames"], 2)
+        self.assertEqual([int(frame[0, 0, 0]) for frame in video.frames], [0, 1, 2])
 
 
 if __name__ == "__main__":

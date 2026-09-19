@@ -7,7 +7,12 @@ import tomllib
 PATH_TARGETS = {
     "selected_data": [("prepare", "data")],
     "context": [("prepare", "output"), ("train", "context")],
-    "model": [("train", "output"), ("predict", "model"), ("evaluate", "model"), ("play", "model")],
+    "model": [
+        ("train", "output"),
+        ("predict", "model"),
+        ("evaluate", "model"),
+        ("play", "model"),
+    ],
     "evaluation": [("evaluate", "data")],
     "rollout": [("play", "output")],
 }
@@ -46,8 +51,11 @@ def apply_config(parser, commands, path: Path):
     # Per-command settings override shared paths/runtime regardless of TOML order.
     for command in commands:
         defaults[command].update(config.get(command, {}))
-        actions = {action.dest: action for action in commands[command]._actions
-                   if action.dest not in {"help", "config"}}
+        actions = {
+            action.dest: action
+            for action in commands[command]._actions
+            if action.dest not in {"help", "config"}
+        }
         for name, value in defaults[command].items():
             if name not in actions:
                 parser.error(f"Unknown config key: {command}.{name}")
