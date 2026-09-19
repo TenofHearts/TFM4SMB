@@ -1,5 +1,7 @@
 data
 preprocessed_data
+processed_data
+artifacts/
 
 .venv
 __pycache__

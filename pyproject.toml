@@ -1,14 +1,18 @@
 [project]
 name = "tfm4mario"
 version = "0.1.0"
-description = "Add your description here"
+description = "RAM-based Mario imitation learning with TabPFN 3.5"
 authors = [
     { name = "Eric", email = "ye_jin2004@163.com" }
 ]
 requires-python = ">=3.14"
 dependencies = [
-    "tabpfn>=9.0.0",
+    "tabpfn>=9.0.0,<10",
+    "numpy>=1.26",
 ]
+
+[project.optional-dependencies]
+game = ["gym-super-mario-bros>=9.1.0,<10", "nes-py>=9.0.1,<10"]
 
 [project.scripts]
 tfm4mario = "tfm4mario:main"

@@ -1,0 +1,45 @@
+# Edit this file, then run: uv run tfm4mario prepare / train / play
+# Relative paths resolve beside this file, not the shell's working directory.
+
+[paths]
+selected_data = "processed_data" # Your successful trajectories; exclude your test level here.
+context = "artifacts/context.npz"
+model = "artifacts/policy"
+evaluation = "artifacts/heldout.npz"
+rollout = "artifacts/rollout-01" # Choose a new directory for each run.
+
+[runtime]
+device = "auto" # "cpu", "cuda", or "auto"; check with: uv run tfm4mario doctor
+seed = 0
+
+[prepare]
+outcome = "win"
+stride = 4
+max_rows = 256 # Small first run; increase to 8192+ after checking memory/latency.
+label_offset = 1 # RAM[f] -> action[f+1]; use 0 only if capture timing is verified.
+ram_encoding = "dataset-cr" # Repairs the source dataset's CR expansion bug.
+
+[train]
+n_estimators = 1
+fit_mode = "fit_with_cache" # Alternatives: "fit_preprocessors", "low_memory".
+# model_path = "/path/to/tabpfn-v3.5-20260909.safetensors" # Optional offline checkpoint.
+
+[predict]
+ram = "artifacts/ram.bin" # Raw 2048-byte dump from your emulator.
+# To use a dataset PNG instead, remove ram above and uncomment:
+# png = "processed_data/episode/original_frame_name.win.png"
+ram_encoding = "dataset-cr" # Only applies to PNG trailers, never raw dumps.
+
+[evaluate]
+batch_size = 128
+
+[play]
+env_id = "SuperMarioBros-1-1-v0" # Change to your held-out level.
+episodes = 1
+max_frames = 18000
+action_repeat = 1 # Increasing this changes control behavior; start at one.
+render = false # true for a local display, false on a headless server.
+
+[doctor]
+# Uncomment after installing the game extra to check RAM access and stepping:
+# env_id = "SuperMarioBros-1-1-v0"
