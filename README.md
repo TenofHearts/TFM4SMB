@@ -258,17 +258,20 @@ the emulator and policy together, headless.
 ## Between-episode online adaptation
 
 `adapt` is a separate experimental mode. Within each episode the policy stays
-frozen. Applied actions and adjacent RAM transitions are labeled with the same
-`-1/0/1` rules used by preparation and staged in bounded memory. Neutral no-op
-self-loops are not replayed: otherwise a sampled stationary mistake becomes
-supervised evidence for repeating that mistake. Exact duplicate transitions are
-also collapsed, keeping the newest copy. Valuable (`1`) and pre-death (`-1`)
-no-ops remain available to the value-conditioned model.
-At episode end, the newest rows are appended to a persistent FIFO replay cache,
-the cache is capped at `adapt.online_capacity`, and TabPFN is refit once on the
-original prepared context plus that replay. The saved base policy is never
-overwritten. The final episode persists its new replay rows but skips an
-unnecessary refit; a later invocation applies that cache before its first episode.
+frozen. The online cache first holds up to `adapt.online_capacity` adjacent RAM
+transitions without action-value labels. When the cache fills, its ending state
+assigns one delayed `-1/0/1` value to every action in that cache: death assigns
+`-1`; otherwise net new progress, score, or power-up gain assigns `1`; and no
+measured result assigns `0`. The labeled batch is appended permanently to the
+accumulated online context, written to `paths.online_cache`, and the now-empty
+cache accepts another batch. A partial final batch is labeled from the episode's
+ending state and flushed the same way.
+
+No refit occurs when a batch is flushed. At episode end, TabPFN is refit once on
+the original prepared context plus every accumulated online batch, so those new
+rows are first used by the next episode. The saved base policy is never
+overwritten. The final episode persists its rows but skips an unnecessary refit;
+a later invocation loads and applies that accumulated context before episode one.
 
 ```powershell
 uv run tfm4mario adapt
@@ -276,25 +279,28 @@ uv run tfm4mario adapt
 
 The supplied configuration runs five consecutive 1-3 episodes. Each episode
 writes its own JSONL trace and MP4, while `summary.json` accumulates reward,
-progress, completion, replay size, action-value counts, and refit duration. The
+progress, completion, online-context size, batch counts, action-value counts, and
+refit duration. The
 next episode uses the updated in-memory context. On later invocations, the
-persistent replay is loaded and applied before episode one. Choose a fresh
+persistent online context is loaded and applied before episode one. Choose a fresh
 `paths.adaptive_rollout` directory for every invocation; retain the same
 `paths.online_cache` to continue adapting, or choose a new cache for an
 independent experiment.
 
-This is supervised online adaptation, not full reinforcement learning: it has no
-learned value function, policy-gradient objective, or explicit exploration
-bonus. CPU refits may pause for a substantial time between episodes. Compare the
-per-episode metrics rather than treating one stochastic run as proof of
-improvement.
+This is supervised batch-delayed adaptation, not full reinforcement learning:
+it has no learned value function or policy-gradient objective. Every action in a
+batch receives the same ending-state value, including actions that may not have
+caused that result. CPU refits may pause for a substantial time between episodes.
+Compare the per-episode metrics rather than treating one stochastic run as proof
+of improvement.
 
 The configured `play` and `adapt` modes use confidence-gated epsilon-greedy
 selection. The greedy action is used whenever maximum class probability is at
-least `0.50`. Below that threshold, the policy chooses a uniformly random known
-action with probability `0.10` and otherwise uses the greedy action. Traces and
-summaries report low-confidence and exploratory decision counts. This explores
-only actions already present in the fitted model's class set.
+least `0.50`. Below that threshold, `play` chooses a uniformly random known
+action with probability `0.10`, while `adapt` uses `0.70`; otherwise each uses
+the greedy action. Traces and summaries report low-confidence and exploratory
+decision counts. This explores only actions already present in the fitted
+model's class set.
 
 ## Optional evaluation and checks
 

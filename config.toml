@@ -8,7 +8,7 @@ model = "artifacts/policy-1-3-v4-stride2"
 evaluation = "artifacts/heldout-v4.npz"
 rollout = "artifacts/rollout-1-3-42-v4-stride2" # Choose a new directory for each run.
 adaptive_rollout = "artifacts/adapt-1-3-42-v4-stride2" # One trace/video per adaptive episode.
-online_cache = "artifacts/online-replay-1-3-v4-stride2.npz" # Bounded persistent experience.
+online_cache = "artifacts/online-batch-context-1-3-v4-stride2.npz" # Accumulated resolved delayed-credit batches.
 
 [runtime]
 device = "auto" # "cpu", "cuda", or "auto"; check with: uv run tfm4mario doctor
@@ -56,10 +56,9 @@ episodes = 5 # Policy is frozen within each episode and refit once between episo
 max_frames = 18000
 action_repeat = 1
 action_selection = "epsilon_greedy"
-epsilon = 0.10 # Explore only when maximum model confidence is below 0.50.
+epsilon = 0.70 # Explore only when maximum model confidence is below 0.50.
 confidence_threshold = 0.50
-online_capacity = 256 # Recent unique useful rows; neutral no-op self-loops are discarded.
-pre_death_frames = 30
+online_capacity = 10000 # Unlabeled transitions per delayed-credit batch.
 render = false
 record_video = true
 video_fps = 60

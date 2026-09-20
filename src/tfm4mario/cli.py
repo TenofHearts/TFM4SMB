@@ -128,13 +128,12 @@ def parser():
     play = sub.add_parser("play", help="Run a frozen-policy Mario rollout")
     add_game_arguments(play, default_episodes=1)
     adapt = sub.add_parser(
-        "adapt", help="Run episodes with bounded replay and between-episode refits"
+        "adapt", help="Run batch-delayed collection and between-episode refits"
     )
     add_game_arguments(adapt, default_episodes=5)
     adapt.add_argument("--context", type=Path)
     adapt.add_argument("--online-cache", type=Path)
     adapt.add_argument("--online-capacity", type=positive, default=256)
-    adapt.add_argument("--pre-death-frames", type=positive, default=30)
     doctor = sub.add_parser(
         "doctor", help="Inspect compute and optionally exercise an emulator"
     )
@@ -264,7 +263,6 @@ def main():
                     args.context,
                     args.online_cache,
                     capacity=args.online_capacity,
-                    pre_death_frames=args.pre_death_frames,
                 )
 
             result = play(

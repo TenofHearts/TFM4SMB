@@ -506,7 +506,19 @@ class ActionAndRolloutTests(unittest.TestCase):
 
 
 class OnlineReplayTests(unittest.TestCase):
-    def test_replay_discards_neutral_noops_and_exact_duplicates(self):
+    def _context(self, root):
+        data = root / "data"
+        data.mkdir()
+        for number, action in ((1, 20), (2, 148), (3, 20), (4, 148)):
+            ram = game_ram()
+            ram[0x86] = number
+            path = data / f"p_s_e0_1-1_f{number}_a{action}_date.win.png"
+            path.write_bytes(png_bytes(ram, action))
+        context = root / "context.npz"
+        prepare(data, context, stride=1, max_rows=10, label_offset=0)
+        return context
+
+    def test_full_cache_gets_one_delayed_value_without_mid_episode_refit(self):
         class Policy:
             def __init__(self):
                 self.refits = []
@@ -517,42 +529,46 @@ class OnlineReplayTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            data = root / "data"
-            data.mkdir()
-            for number, action in ((1, 20), (2, 148), (3, 20), (4, 148)):
-                ram = game_ram()
-                ram[0x86] = number
-                path = data / f"p_s_e0_1-1_f{number}_a{action}_date.win.png"
-                path.write_bytes(png_bytes(ram, action))
-            context = root / "context.npz"
-            prepare(data, context, stride=1, max_rows=10, label_offset=0)
-
+            context = self._context(root)
             policy = Policy()
-            replay = OnlineReplay(
-                policy,
-                context,
-                root / "online.npz",
-                capacity=8,
-                pre_death_frames=2,
-            )
-            stationary = game_ram()
-            replay.begin_episode(stationary)
-            for _ in range(4):
-                replay.observe(stationary, stationary, 0, stationary)
-            replay.observe(stationary, stationary, 16, stationary)
-            replay.observe(stationary, stationary, 16, stationary)
-            moving = stationary.copy()
-            moving[0x86] += 1
-            replay.observe(stationary, stationary, 20, moving)
+            cache = root / "online.npz"
+            replay = OnlineReplay(policy, context, cache, capacity=3)
+            initial = game_ram()
+            replay.begin_episode(initial)
+            current = initial.copy()
+            flushed = None
+            for index, action in enumerate((0, 16, 20), 1):
+                after = current.copy()
+                after[0x86] = index
+                flushed = replay.observe(current, current, action, after)
+                current = after
 
+            self.assertEqual(flushed["rows"], 3)
+            self.assertEqual(flushed["assigned_action_value"], 1)
+            self.assertEqual(replay.summary()["pending_rows"], 0)
+            self.assertEqual(replay.summary()["accumulated_context_rows"], 3)
+            self.assertEqual(policy.refits, [])
+            with np.load(cache, allow_pickle=False) as saved:
+                np.testing.assert_array_equal(saved["action_values"], [1, 1, 1])
+
+            replay.observe(current, current, 16, current)
+            replay.observe(current, current, 0, current)
+            self.assertEqual(replay.summary()["pending_rows"], 2)
+            self.assertEqual(policy.refits, [])
             update = replay.end_episode()
-            self.assertEqual(update["cache_rows"], 2)
-            self.assertEqual(update["action_counts"], {16: 1, 20: 1})
-            self.assertEqual(update["discarded_neutral_noops"], 4)
-            self.assertEqual(update["discarded_duplicates"], 1)
-            self.assertEqual(policy.refits[-1][1][-1], 20)
+            self.assertTrue(update["refit_performed"])
+            self.assertEqual(len(policy.refits), 1)
+            self.assertEqual(update["flushed_batches"], 2)
+            self.assertEqual(update["accumulated_context_rows"], 5)
+            np.testing.assert_array_equal(
+                policy.refits[0][1][-5:], [0, 16, 20, 16, 0]
+            )
+            with np.load(cache, allow_pickle=False) as saved:
+                np.testing.assert_array_equal(
+                    saved["action_values"], [1, 1, 1, 0, 0]
+                )
 
-    def test_replay_is_bounded_and_refits_only_after_episode(self):
+    def test_partial_cache_is_marked_at_episode_end_and_persists(self):
         class Policy:
             def __init__(self):
                 self.refits = []
@@ -563,59 +579,49 @@ class OnlineReplayTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            data = root / "data"
-            data.mkdir()
-            for number, action in ((1, 20), (2, 148), (3, 20), (4, 148)):
-                ram = game_ram()
-                ram[0x86] = number
-                path = data / f"p_s_e0_1-1_f{number}_a{action}_date.win.png"
-                path.write_bytes(png_bytes(ram, action))
-            context = root / "context.npz"
-            prepare(data, context, stride=1, max_rows=10, label_offset=0)
-
+            context = self._context(root)
             policy = Policy()
             cache = root / "online.npz"
-            replay = OnlineReplay(
-                policy, context, cache, capacity=4, pre_death_frames=2
-            )
+            replay = OnlineReplay(policy, context, cache, capacity=4)
             initial = game_ram()
             replay.begin_episode(initial)
-            previous = initial.copy()
-            for index in range(5):
-                current = game_ram()
-                after = game_ram()
-                current[0x86] = index
-                after[0x86] = index + 1
-                if index == 4:
-                    after[0x0E] = 0x0B
-                replay.observe(
-                    previous,
-                    current,
-                    20 if index % 2 == 0 else 148,
-                    after,
-                    death=index == 4,
-                )
-                previous = current
+            replay.observe(initial, initial, 20, initial)
+            replay.observe(initial, initial, 148, initial, death=True)
             self.assertEqual(policy.refits, [])
             update = replay.end_episode(death=True)
             self.assertEqual(len(policy.refits), 1)
-            self.assertEqual(update["cache_rows"], 4)
-            self.assertEqual(update["action_value_counts"], {-1: 2, 1: 2})
+            self.assertEqual(update["accumulated_context_rows"], 2)
+            self.assertEqual(update["action_value_counts"], {-1: 2})
             with np.load(cache, allow_pickle=False) as saved:
-                self.assertEqual(saved["X"].shape, (4, len(FEATURE_NAMES)))
-                np.testing.assert_array_equal(saved["action_values"], [1, 1, -1, -1])
+                self.assertEqual(saved["X"].shape, (2, len(FEATURE_NAMES)))
+                np.testing.assert_array_equal(saved["action_values"], [-1, -1])
 
             restored_policy = Policy()
-            restored = OnlineReplay(
-                restored_policy, context, cache, capacity=4, pre_death_frames=2
-            )
+            restored = OnlineReplay(restored_policy, context, cache, capacity=4)
             self.assertEqual(len(restored_policy.refits), 1)
-            self.assertEqual(restored.summary()["cache_rows"], 4)
-            restored.begin_episode(initial)
-            restored.observe(initial, initial, 20, initial)
-            final_update = restored.end_episode(refit=False)
-            self.assertFalse(final_update["refit_performed"])
-            self.assertEqual(len(restored_policy.refits), 1)
+            self.assertEqual(restored.summary()["accumulated_context_rows"], 2)
+
+    def test_context_is_not_refit_after_final_episode(self):
+        class Policy:
+            def __init__(self):
+                self.refits = []
+
+            def refit_context(self, X, y):
+                self.refits.append((X.copy(), y.copy()))
+                return 1.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self._context(root)
+            policy = Policy()
+            replay = OnlineReplay(policy, context, root / "online.npz", capacity=2)
+            initial = game_ram()
+            replay.begin_episode(initial)
+            replay.observe(initial, initial, 20, initial)
+            update = replay.end_episode(refit=False)
+            self.assertFalse(update["refit_performed"])
+            self.assertEqual(policy.refits, [])
+            self.assertEqual(update["accumulated_context_rows"], 1)
 
 
 if __name__ == "__main__":
