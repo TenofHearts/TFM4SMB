@@ -12,7 +12,7 @@ online_cache = "artifacts/online-batch-context-1-3-v4-stride2.npz" # Accumulated
 
 [runtime]
 device = "auto" # "cpu", "cuda", or "auto"; check with: uv run tfm4mario doctor
-seed = 42
+seed = 0
 
 [prepare]
 outcome = "all" # Both outcomes provide per-action value examples.
@@ -20,6 +20,7 @@ stride = 4 # Keep every fourth teacher decision; temporal inputs still use adjac
 max_rows = 50000
 head_rows_per_trajectory = 16 # Prefer each trajectory's opening wait-to-move transition.
 pre_death_frames = 30 # Half a second at 60 FPS; detected pre-death actions receive -1.
+min_progress_delta = 3 # Success needs >=3 pixels forward in one frame and a new progress maximum.
 label_offset = 1 # RAM[f] is post-action state; predict the action for frame f+1.
 include_level = "1-3"
 ram_encoding = "dataset-cr" # Repairs the source dataset's CR expansion bug.
@@ -51,7 +52,7 @@ video_fps = 60 # NES playback rate; model inference latency is not encoded.
 
 [adapt]
 env_id = "SuperMarioBros-1-3-v0"
-episodes = 5 # Policy is frozen within each episode and refit once between episodes.
+episodes = 50 # Policy is frozen within each episode and refit once between episodes.
 max_frames = 18000
 action_repeat = 1
 action_selection = "epsilon_sample"

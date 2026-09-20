@@ -4,7 +4,7 @@ A RAM-based imitation policy using successful and failed trajectories cached by
 `data_selection.py`. The pipeline prepares a compact context table, fits an
 explicit TabPFN **v3.5** classifier, saves it, and predicts controller actions
 from live NES RAM. Each sample conditions on two consecutive frames and a desired
-per-action value. The supplied configuration deliberately restricts both
+per-action success value. The supplied configuration deliberately restricts both
 training and live evaluation to level 1-3; it measures same-level control rather
 than cross-level generalization.
 
@@ -120,9 +120,12 @@ power-ups, so the feature names intentionally say “object.”
 
 The model input concatenates the preceding and current state vectors and appends
 `desired_action_value`, producing **409 inputs**. Each recorded action is labeled
-from its observed RAM transition: `1` for new maximum forward progress, a score
-increase, or a power-up gain; `0` when no measurable consequence is observed;
-and `-1` within the configured 30-frame window before a detected death. Death is
+from its observed RAM transition: `1` when it moves forward by at least the
+configured `min_progress_delta` in one frame **and** reaches a new trajectory
+progress maximum, or when it produces a score or power-up gain; `0` when no
+measurable consequence is observed; and `-1` within the configured 30-frame
+window before a detected death. The supplied 3-pixel threshold selects fast
+forward movement rather than rewarding every 1-pixel crawl. Death is
 detected from Mario's RAM state rather than inferred from a `fail` filename.
 Negative takes precedence over positive when both rules match. Live prediction
 deliberately requests `desired_action_value=1`.

@@ -63,6 +63,15 @@ def parser():
         help="Label this many frames immediately before detected death as -1",
     )
     prep.add_argument(
+        "--min-progress-delta",
+        type=positive,
+        default=3,
+        help=(
+            "Require this many pixels of forward movement in one frame, plus a "
+            "new trajectory maximum, before labeling progress as successful"
+        ),
+    )
+    prep.add_argument(
         "--ram-encoding", choices=["dataset-cr", "raw"], default="dataset-cr"
     )
     fit = sub.add_parser(
@@ -220,6 +229,7 @@ def main():
             exclude_level=args.exclude_level,
             head_rows_per_trajectory=args.head_rows_per_trajectory,
             pre_death_frames=args.pre_death_frames,
+            min_progress_delta=args.min_progress_delta,
         )
     elif args.command == "train":
         from .policy import train

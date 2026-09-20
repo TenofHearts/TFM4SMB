@@ -203,6 +203,7 @@ class OnlineReplay:
             "excluded_level": self.base_metadata.get("excluded_level"),
             "outcome": self.base_metadata.get("outcome"),
             "label_offset": self.base_metadata.get("label_offset"),
+            "min_progress_delta": self.base_metadata.get("min_progress_delta"),
             "stride": self.base_metadata.get("stride"),
             "seed": self.base_metadata.get("seed"),
         }

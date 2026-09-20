@@ -171,6 +171,33 @@ class FeatureTests(unittest.TestCase):
 
 
 class DatasetTests(unittest.TestCase):
+    def test_progress_success_requires_large_delta_and_new_maximum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            # 0->2 is a small new maximum. 5->8 is a large advance, but it
+            # remains below the earlier maximum of 10. Neither is successful.
+            positions = [0, 2, 10, 5, 8]
+            for number, position in enumerate(positions, 1):
+                ram = game_ram()
+                ram[0x86] = position
+                path = data / f"p_s_e0_1-1_f{number}_a20_date.win.png"
+                path.write_bytes(png_bytes(ram, 20))
+            output = root / "values.npz"
+            metadata = prepare(
+                data,
+                output,
+                stride=1,
+                max_rows=10,
+                label_offset=1,
+                min_progress_delta=3,
+            )
+            with np.load(output, allow_pickle=False) as table:
+                self.assertEqual(table["frames"].tolist(), [1, 2, 3, 4])
+                self.assertEqual(table["action_values"].tolist(), [0, 1, 0, 0])
+            self.assertEqual(metadata["min_progress_delta"], 3)
+
     def test_next_frame_alignment_numeric_order_and_no_cross_episode(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -359,7 +386,7 @@ class DatasetTests(unittest.TestCase):
                 for episode in range(2):
                     for number in range(1, 9):
                         ram = game_ram()
-                        ram[0x86] = 2 if number >= 2 else 1
+                        ram[0x86] = 4 if number >= 2 else 1
                         if outcome == "fail" and number == 8:
                             ram[0x0E] = 0x0B
                         action = 20 if number % 2 == 0 else 148

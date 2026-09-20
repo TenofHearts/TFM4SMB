@@ -39,14 +39,26 @@ def _death_frame(frames, read_ram):
     return onset
 
 
-def _action_value(before, after, progress_max, effect_frame, death_frame, window):
+def _action_value(
+    before,
+    after,
+    progress_max,
+    effect_frame,
+    death_frame,
+    window,
+    min_progress_delta=1,
+):
     if (
         death_frame is not None
         and effect_frame <= death_frame
         and death_frame - effect_frame < window
     ):
         return -1
-    useful_progress = _player_x(after) > progress_max
+    before_x = _player_x(before)
+    after_x = _player_x(after)
+    useful_progress = (
+        after_x - before_x >= min_progress_delta and after_x > progress_max
+    )
     score_gain = _decimal_counter(after, 0x7DE, 6) > _decimal_counter(
         before, 0x7DE, 6
     )
@@ -136,6 +148,7 @@ def prepare(
     exclude_level=None,
     head_rows_per_trajectory=16,
     pre_death_frames=30,
+    min_progress_delta=3,
 ):
     if output.exists():
         raise FileExistsError(f"Output exists; choose a new path: {output}")
@@ -145,10 +158,12 @@ def prepare(
         or head_rows_per_trajectory < 0
         or label_offset not in (0, 1)
         or pre_death_frames < 1
+        or min_progress_delta < 1
     ):
         raise ValueError(
             "stride/max_rows must be positive; head rows must be nonnegative; "
-            "label_offset must be 0 or 1; pre_death_frames must be positive"
+            "label_offset must be 0 or 1; pre-death frames and minimum progress "
+            "delta must be positive"
         )
     if include_level is not None and exclude_level is not None:
         raise ValueError("include_level and exclude_level are mutually exclusive")
@@ -269,6 +284,7 @@ def prepare(
             effect_frame,
             death_frames[(source.episode, source.outcome)],
             pre_death_frames,
+            min_progress_delta,
         )
         rows.append(extract_features(ram, previous_ram, action_value=action_value))
         labels.append(target.action)
@@ -311,8 +327,12 @@ def prepare(
         "mandatory_action_change_rows": sum(item[3] for item in selected),
         "selection": "mandatory-changes-trajectory-round-robin",
         "pre_death_frames": pre_death_frames,
+        "min_progress_delta": min_progress_delta,
         "action_value_rule": {
-            "positive": "new_progress_or_score_gain_or_powerup_gain",
+            "positive": (
+                "minimum_forward_delta_and_new_progress_max_or_score_gain_or_"
+                "powerup_gain"
+            ),
             "neutral": "no_observed_transition_reward",
             "negative": "within_pre_death_window",
         },
