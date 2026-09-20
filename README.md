@@ -1,10 +1,11 @@
 # TabPFN 3.5 for Super Mario Bros.
 
-A RAM-based imitation policy using the successful trajectories cached by
+A RAM-based imitation policy using successful and failed trajectories cached by
 `data_selection.py`. The pipeline prepares a compact context table, fits an
 explicit TabPFN **v3.5** classifier, saves it, and predicts controller actions
-from live NES RAM. Level 8-4 is explicitly excluded from the configured context
-and reserved for emulator testing.
+from live NES RAM. Each sample conditions on two consecutive frames and a desired
+success flag. The configured held-out level is explicitly excluded from the
+context and reserved for emulator testing.
 
 `train` performs TabPFN context fitting, **not gradient fine-tuning or reinforcement
 learning**. Successful demonstrations do not establish that the resulting policy
@@ -63,7 +64,7 @@ The extraction reads and validates each PNG once, then stores RAM, action, frame
 identity, and outcome in one compressed `.npz` shard per episode under
 `processed_data/metadata_cache`. It stores no image pixels.
 Completed shards are reused if extraction is restarted. Use `--data` and
-`--output` to override the defaults, `--outcome all` to include failures, or
+`--output` to override the defaults, `--outcome win` for a win-only ablation, or
 `--workers N` to tune concurrent reads. The cache is self-contained, so the PNGs
 are not reopened by `prepare`.
 
@@ -76,11 +77,13 @@ Set `prepare.exclude_level` to the held-out world-level. The supplied config use
 cache can remain intact. Point `paths.selected_data` at the cache directory.
 Inputs are read-only and existing context artifacts are never overwritten.
 
-Preparation selects winning trajectories by default, sorts frame numbers
-numerically within each episode, and samples candidate rows reproducibly across
-the selected data. It first keeps the configured opening rows from every
-trajectory, preserving the wait-to-move transition, then reservoir-samples the
-remaining gameplay. Non-controllable states are removed before either selection.
+Preparation selects both winning and failed trajectories by default and sorts
+frame numbers numerically within each episode. Candidate rows are stratified by
+target action and drawn round-robin across trajectory IDs. `max_action_share`
+places a hard ceiling on the selected fraction of any single action; preparation
+fails with an explanation if the available action classes cannot satisfy it.
+Opening candidates are preferred within each trajectory. Non-controllable states
+are removed before selection.
 `--stride 4` reduces context redundancy; it does **not** cause
 the live emulator to skip frames. Inspect the returned action counts, especially
 for rare jump/climb/pipe combinations, before scaling up.
@@ -92,7 +95,7 @@ decoding, Torch, weights, or emulator is required for preparation.
 
 ### RAM features
 
-The shared offline/live extractor produces **204 features**:
+The base semantic extractor produces **204 state features**:
 
 | Group | Features |
 |---|---|
@@ -109,11 +112,18 @@ types need different behavior. Speeds are signed register values, not claimed to
 be calibrated pixels per frame. Object types share slots with platforms and
 power-ups, so the feature names intentionally say “object.”
 
-The extractor excludes controller registers, score, frame counter, level/world
-IDs, outcome, and absolute level progress. The two semantic timers are retained:
+The model input concatenates the preceding and current state vectors and appends
+`desired_success`, producing **409 inputs**. Training rows use `1` for winning
+episodes and `0` for failed episodes; live prediction deliberately requests `1`.
+The first decision after reset duplicates the current state because no prior
+frame exists. Later rollout decisions use genuinely adjacent emulator states,
+including when `action_repeat` is greater than one.
+
+The state extractor excludes controller registers, score, frame counter,
+level/world IDs, and absolute level progress. The two semantic timers are retained:
 without them, the visually identical opening wait states alias “wait” and “move.”
-It currently does not add history,
-fireball-specific slots or an exhaustive terrain physics model. Feature schema
+It currently does not add controller history, fireball-specific slots, or an
+exhaustive terrain physics model. Feature schema
 version and ordered names are checked when loading a policy or evaluation table.
 
 ### Dataset repairs and action timing
@@ -142,7 +152,7 @@ that produced an already-recorded state, not for live control.
 
 ## Fit and predict
 
-The supplied config uses an 8,192-row candidate cap, one estimator, automatic
+The supplied config uses a 50,000-row candidate cap, one estimator, automatic
 device selection, and new artifact paths that preserve the earlier smoke model:
 
 ```powershell
@@ -185,7 +195,8 @@ from pathlib import Path
 from tfm4mario.policy import Policy
 
 policy = Policy(Path("artifacts/policy"), device="cuda")
-decision = policy.predict_ram(ram_bytes)  # exactly 2048 bytes at a frame boundary
+policy.reset_history()  # call at every episode boundary
+decision = policy.predict_ram(ram_bytes, success=1)  # exactly 2048 bytes
 # Set decision["buttons"], advance ONE emulated frame, then read RAM again.
 ```
 
@@ -204,7 +215,7 @@ decision = policy.predict_ram(ram_bytes)  # exactly 2048 bytes at a frame bounda
    The pinned major versions use Gymnasium. Do not mix old Gym/nes-py 8.x
    installation recipes into this environment. If native emulator installation
    fails on your machine, use a Linux server/WSL and send the build error.
-3. Confirm `doctor` reports `ram_bytes: 2048`, `features: 204`, and the intended
+3. Confirm `doctor` reports `ram_bytes: 2048`, `features: 409`, and the intended
    device. Set `play.env_id` to your held-out world and level.
 4. Run headless on a server, or set `play.render = true` on a machine with a display.
    Set `play.record_video = true` to write `episode-000.mp4` inside the configured
@@ -239,7 +250,7 @@ The configured live evaluation uses the actual 8-4 emulator. If you also want
 offline action metrics, create a separate metadata-cache directory containing
 only the 8-4 episode shards. Copy the config to `heldout.toml`, point
 `paths.selected_data` at that directory, set `paths.context` to
-`artifacts/heldout.npz`, remove `prepare.exclude_level`, and set the outcome you
+`artifacts/heldout-v3.npz`, remove `prepare.exclude_level`, and set the outcome you
 want. Run preparation with that config, then evaluation with the original config:
 
 ```powershell

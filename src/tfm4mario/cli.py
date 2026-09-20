@@ -16,6 +16,13 @@ def positive(value):
     return value
 
 
+def fraction(value):
+    value = float(value)
+    if not 0 < value <= 1:
+        raise argparse.ArgumentTypeError("must be greater than 0 and at most 1")
+    return value
+
+
 def parser():
     p = argparse.ArgumentParser(description="TabPFN 3.5 Mario RAM imitation pipeline")
     p.add_argument("--config", type=Path, default=Path("config.toml"))
@@ -25,7 +32,7 @@ def parser():
     )
     prep.add_argument("--data", type=Path)
     prep.add_argument("--output", type=Path)
-    prep.add_argument("--outcome", choices=["win", "fail", "all"], default="win")
+    prep.add_argument("--outcome", choices=["win", "fail", "all"], default="all")
     prep.add_argument("--stride", type=positive, default=4)
     prep.add_argument("--max-rows", type=positive, default=8192)
     prep.add_argument("--seed", type=int, default=0)
@@ -43,7 +50,13 @@ def parser():
         "--head-rows-per-trajectory",
         type=int,
         default=16,
-        help="Keep this many opening candidates per trajectory before reservoir sampling",
+        help="Prefer this many opening candidates per trajectory during selection",
+    )
+    prep.add_argument(
+        "--max-action-share",
+        type=fraction,
+        default=0.5,
+        help="Hard maximum fraction for any one action in the selected rows",
     )
     prep.add_argument(
         "--ram-encoding", choices=["dataset-cr", "raw"], default="dataset-cr"
@@ -184,6 +197,7 @@ def main():
             encoding=args.ram_encoding,
             exclude_level=args.exclude_level,
             head_rows_per_trajectory=args.head_rows_per_trajectory,
+            max_action_share=args.max_action_share,
         )
     elif args.command == "train":
         from .policy import train

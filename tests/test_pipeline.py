@@ -12,7 +12,13 @@ import numpy as np
 
 from tfm4mario.actions import button_names, to_nes_action, validate_action
 from tfm4mario.dataset import load_table, prepare
-from tfm4mario.features import FEATURE_NAMES, extract_features, feature_dict, tile_at
+from tfm4mario.features import (
+    FEATURE_NAMES,
+    STATE_FEATURE_NAMES,
+    extract_features,
+    feature_dict,
+    tile_at,
+)
 from tfm4mario.game import rollout
 from tfm4mario.metadata_cache import build_cache
 from tfm4mario.ram import (
@@ -92,7 +98,8 @@ class ConfigTests(unittest.TestCase):
     def test_typos_and_invalid_numbers_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.toml"
-            for content in ['[prepare]\nmax_rows=0', '[train]\nn_estimator=1',
+            for content in ['[prepare]\nmax_rows=0', '[prepare]\nmax_action_share=1.1',
+                            '[train]\nn_estimator=1',
                             '[play]\nrender="false"', '[prepare]\nlabel_offset=2']:
                 config.write_text(content)
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
@@ -133,6 +140,27 @@ class FeatureTests(unittest.TestCase):
         np.testing.assert_array_equal(before, extract_features(ram))
         self.assertEqual(len(before), len(FEATURE_NAMES))
 
+    def test_two_frame_window_and_success_condition(self):
+        previous = game_ram()
+        current = game_ram()
+        previous[0x86] = 9
+        current[0x86] = 10
+        values = extract_features(current, previous, success=0)
+        self.assertEqual(len(values), len(STATE_FEATURE_NAMES) * 2 + 1)
+        self.assertEqual(values[FEATURE_NAMES.index("previous_player_subtile_x")], 9)
+        self.assertEqual(values[FEATURE_NAMES.index("current_player_subtile_x")], 10)
+        self.assertEqual(values[FEATURE_NAMES.index("desired_success")], 0)
+        np.testing.assert_array_equal(
+            values, extract_features(bytes(current), bytes(previous), success=0)
+        )
+        padded = extract_features(current, success=1)
+        np.testing.assert_array_equal(
+            padded[:len(STATE_FEATURE_NAMES)],
+            padded[len(STATE_FEATURE_NAMES):2 * len(STATE_FEATURE_NAMES)],
+        )
+        with self.assertRaisesRegex(ValueError, "success"):
+            extract_features(current, success=2)
+
     def test_invalid_ram_rejected(self):
         for value in [np.zeros(2047), np.zeros(2048), np.full(2048, 256), np.full(2048, -1)]:
             with self.assertRaises(ValueError):
@@ -157,7 +185,14 @@ class DatasetTests(unittest.TestCase):
             prepare(data, output, stride=1, max_rows=100, label_offset=1)
             X, y, meta = load_table(output)
             np.testing.assert_array_equal(y, [20, 148, 20, 148])
-            np.testing.assert_array_equal(X[:, FEATURE_NAMES.index("player_subtile_x")], [9, 10, 9, 10])
+            np.testing.assert_array_equal(
+                X[:, FEATURE_NAMES.index("current_player_subtile_x")],
+                [9, 10, 9, 10],
+            )
+            np.testing.assert_array_equal(
+                X[:, FEATURE_NAMES.index("previous_player_subtile_x")],
+                [9, 9, 9, 9],
+            )
             self.assertEqual(meta["trajectory_count"], 2)
             self.assertEqual(meta["skipped"]["missing_target_frame"], 4)
             self.assertEqual(meta["priority_rows"], 4)
@@ -182,10 +217,10 @@ class DatasetTests(unittest.TestCase):
             direct = root / "direct.npz"
             cached = root / "cached.npz"
             cache = root / "metadata-cache"
-            prepare(data, direct, stride=1, max_rows=100, label_offset=1)
+            prepare(data, direct, outcome="win", stride=1, max_rows=100, label_offset=1)
             result = build_cache(data, cache, outcome="all", workers=2)
             resumed = build_cache(data, cache, outcome="all", workers=2)
-            prepare(cache, cached, stride=1, max_rows=100, label_offset=1)
+            prepare(cache, cached, outcome="win", stride=1, max_rows=100, label_offset=1)
             direct_x, direct_y, direct_meta = load_table(direct)
             cached_x, cached_y, cached_meta = load_table(cached)
             np.testing.assert_array_equal(cached_x, direct_x)
@@ -220,7 +255,7 @@ class DatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exclude_level"):
                 prepare(data, root / "bad.npz", exclude_level="world-8")
 
-    def test_opening_rows_are_preserved_before_reservoir_sampling(self):
+    def test_opening_rows_are_preferred_during_balanced_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "data"
@@ -243,6 +278,41 @@ class DatasetTests(unittest.TestCase):
                 self.assertIn((episode, 2), selected)
             self.assertEqual(metadata["priority_rows"], 4)
             self.assertEqual(loaded["effective_head_rows_per_trajectory"], 2)
+
+    def test_failures_success_flag_and_action_cap_are_applied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            specifications = [("win", 2, 20), ("fail", 1, 148)]
+            for outcome, embedded, dominant in specifications:
+                for episode in range(2):
+                    for number in range(1, 9):
+                        ram = game_ram()
+                        ram[0x86] = number
+                        action = dominant if number <= 6 else (148 if dominant == 20 else 20)
+                        path = data / (
+                            f"p_s_e{episode}_1-1_f{number}_a{action}_date.{outcome}.png"
+                        )
+                        path.write_bytes(png_bytes(ram, action, outcome=embedded))
+            output = root / "balanced.npz"
+            metadata = prepare(
+                data,
+                output,
+                outcome="all",
+                stride=1,
+                max_rows=12,
+                label_offset=0,
+                head_rows_per_trajectory=1,
+                max_action_share=0.5,
+            )
+            with np.load(output, allow_pickle=False) as table:
+                flags = table["X"][:, FEATURE_NAMES.index("desired_success")]
+                outcomes = table["outcomes"].tolist()
+            self.assertEqual(set(outcomes), {"win", "fail"})
+            self.assertEqual(set(flags.tolist()), {0.0, 1.0})
+            self.assertLessEqual(max(metadata["action_counts"].values()), 6)
+            self.assertEqual(metadata["selection"], "action-balanced-trajectory-round-robin")
 
 
 class ActionAndRolloutTests(unittest.TestCase):
@@ -270,17 +340,26 @@ class ActionAndRolloutTests(unittest.TestCase):
                 return None, 1.0, len(self.actions) == 2, False, {"flag_get": len(self.actions) == 2}
 
         class Policy:
+            def __init__(self):
+                self.previous = []
+
+            def reset_history(self):
+                self.previous.append("reset")
+
             def predict_ram(self, ram, **kwargs):
+                self.previous.append(kwargs["previous_ram"])
                 return {"action": 148, "predict_seconds": .01, "buttons": ["A", "B", "right"]}
 
         env = Env()
+        policy = Policy()
         trace = io.StringIO()
-        result = rollout(env, Policy(), max_frames=20, action_repeat=4, trace=trace)
+        result = rollout(env, policy, max_frames=20, action_repeat=4, trace=trace)
         self.assertEqual(env.actions, [131, 131])
         self.assertEqual(result["frames"], 2)
         self.assertEqual(result["decisions"], 1)
         self.assertTrue(result["flag_get"])
         self.assertEqual(json.loads(trace.getvalue())["action"], 148)
+        self.assertEqual(policy.previous, ["reset", None])
 
     def test_video_receives_initial_and_stepped_frames(self):
         class Env:

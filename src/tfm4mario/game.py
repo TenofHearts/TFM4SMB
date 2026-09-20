@@ -149,6 +149,8 @@ def rollout(
     if max_frames < 1 or action_repeat < 1:
         raise ValueError("max_frames/action_repeat must be positive")
     info = reset_env(env, seed)
+    if hasattr(policy, "reset_history"):
+        policy.reset_history()
     reward_total = 0.0
     frames = 0
     decisions = 0
@@ -157,14 +159,26 @@ def rollout(
     flag_get = bool(info.get("flag_get", False))
     started = time.perf_counter()
     rng = np.random.default_rng(seed)
+    previous_ram = None
     if video is not None:
         video.write(env.render())
     while frames < max_frames and not (terminated or truncated or flag_get):
-        decision = policy.predict_ram(get_ram(env), selection=action_selection, rng=rng)
+        current_ram = get_ram(env)
+        decision = policy.predict_ram(
+            current_ram,
+            previous_ram=previous_ram,
+            success=1,
+            selection=action_selection,
+            rng=rng,
+        )
         latencies.append(decision["predict_seconds"])
         decisions += 1
         # Never add a silent frameskip: the context's targets are per-frame.
         for _ in range(min(action_repeat, max_frames - frames)):
+            # Preserve the state immediately before the last emulated step.  At
+            # the next decision it is exactly one frame behind current RAM even
+            # when action_repeat is greater than one.
+            previous_ram = get_ram(env)
             reward, terminated, truncated, info = step_env(
                 env, to_nes_action(decision["action"])
             )

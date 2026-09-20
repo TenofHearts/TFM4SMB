@@ -1,12 +1,13 @@
-"""Named state features shared by dataset preparation and live inference.
+"""Named temporal features shared by dataset preparation and live inference.
 
 Addresses follow doppelganger's SMB1 disassembly. No controller registers,
-outcomes, frame numbers, score, world/level IDs, or absolute level progress.
+frame numbers, score, world/level IDs, or absolute level progress.  The terminal
+episode outcome is exposed only as an explicit desired-success condition.
 """
 
 import numpy as np
 
-SCHEMA = "smb1-semantic-ram-v2"
+SCHEMA = "smb1-semantic-ram-v3-two-frame-success"
 TILE_COLUMNS = range(-3, 8)
 TILE_ROWS = range(13)
 
@@ -116,16 +117,37 @@ def feature_dict(ram) -> dict[str, float]:
     return {key: float(value) for key, value in features.items()}
 
 
-FEATURE_NAMES = tuple(feature_dict(np.zeros(2048, dtype=np.uint8)))
+STATE_FEATURE_NAMES = tuple(feature_dict(np.zeros(2048, dtype=np.uint8)))
+FEATURE_NAMES = (
+    tuple(f"previous_{name}" for name in STATE_FEATURE_NAMES)
+    + tuple(f"current_{name}" for name in STATE_FEATURE_NAMES)
+    + ("desired_success",)
+)
 CATEGORICAL_INDICES = tuple(
     i
     for i, name in enumerate(FEATURE_NAMES)
-    if name.startswith("tile_")
+    if "_tile_" in name
     or name.endswith(("_type", "_state", "_facing", "_direction", "_size", "_powerup"))
-    or name in {"swimming", "crouching", "collision_bits"}
+    or name.endswith(("_swimming", "_crouching", "_collision_bits"))
+    or name == "desired_success"
 )
 
 
-def extract_features(ram) -> np.ndarray:
+def extract_state_features(ram) -> np.ndarray:
     values = feature_dict(ram)
-    return np.asarray([values[name] for name in FEATURE_NAMES], dtype=np.float32)
+    return np.asarray([values[name] for name in STATE_FEATURE_NAMES], dtype=np.float32)
+
+
+def extract_features(ram, previous_ram=None, *, success=1) -> np.ndarray:
+    """Return two adjacent state vectors plus the requested episode outcome.
+
+    Duplicate the current state when no prior state exists.  This is the same
+    padding used for the first live decision after an environment reset.
+    """
+    if success not in (0, 1, False, True):
+        raise ValueError("success must be 0 or 1")
+    current = extract_state_features(ram)
+    previous = current if previous_ram is None else extract_state_features(previous_ram)
+    return np.concatenate(
+        (previous, current, np.asarray([int(success)], dtype=np.float32))
+    )

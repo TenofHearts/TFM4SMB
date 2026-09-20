@@ -9,7 +9,13 @@ import numpy as np
 
 from .actions import button_names, validate_action
 from .dataset import load_table
-from .features import CATEGORICAL_INDICES, FEATURE_NAMES, SCHEMA, extract_features
+from .features import (
+    CATEGORICAL_INDICES,
+    FEATURE_NAMES,
+    SCHEMA,
+    checked_ram,
+    extract_features,
+)
 
 
 def train(
@@ -95,10 +101,20 @@ class Policy:
         from tabpfn.model_loading import load_fitted_tabpfn_model
 
         self.model = load_fitted_tabpfn_model(fitted, device=device)
+        self._previous_ram = None
 
-    def predict_ram(self, ram, *, selection="argmax", rng=None):
+    def reset_history(self):
+        """Forget temporal context at an episode boundary."""
+        self._previous_ram = None
+
+    def predict_ram(
+        self, ram, *, previous_ram=None, success=1, selection="argmax", rng=None
+    ):
         started = time.perf_counter()
-        probabilities = self.model.predict_proba(extract_features(ram)[None, :])[0]
+        prior = self._previous_ram if previous_ram is None else previous_ram
+        features = extract_features(ram, prior, success=success)
+        self._previous_ram = checked_ram(ram).astype(np.uint8)
+        probabilities = self.model.predict_proba(features[None, :])[0]
         if selection == "argmax":
             index = int(np.argmax(probabilities))
         elif selection == "sample":
@@ -112,6 +128,7 @@ class Policy:
             "buttons": button_names(action),
             "confidence": float(probabilities[index]),
             "selection": selection,
+            "desired_success": int(success),
             "predict_seconds": time.perf_counter() - started,
         }
 

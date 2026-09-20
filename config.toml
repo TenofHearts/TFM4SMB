@@ -2,21 +2,22 @@
 # Relative paths resolve beside this file, not the shell's working directory.
 
 [paths]
-selected_data = "processed_data/metadata_cache" # Cached successful trajectories; exclude held-out levels before extraction.
-context = "artifacts/context-1-1.npz"
-model = "artifacts/policy-1-1"
-evaluation = "artifacts/heldout.npz"
-rollout = "artifacts/rollout-1-1" # Choose a new directory for each run.
+selected_data = "processed_data/metadata_cache" # Cached win/fail trajectories; exclude held-out levels during preparation.
+context = "artifacts/context-1-1-v3.npz"
+model = "artifacts/policy-1-1-v3"
+evaluation = "artifacts/heldout-v3.npz"
+rollout = "artifacts/rollout-1-1-v3" # Choose a new directory for each run.
 
 [runtime]
 device = "auto" # "cpu", "cuda", or "auto"; check with: uv run tfm4mario doctor
 seed = 0
 
 [prepare]
-outcome = "win"
+outcome = "all" # Train on wins and failures; desired_success conditions the policy.
 stride = 4
-max_rows = 8192
-head_rows_per_trajectory = 16 # Preserve each level's opening wait-to-move transition.
+max_rows = 50000
+head_rows_per_trajectory = 16 # Prefer each trajectory's opening wait-to-move transition.
+max_action_share = 0.40 # Action-balanced trajectory sampling caps every action at 40%.
 label_offset = 1 # RAM[f] is post-action state; predict the action for frame f+1.
 exclude_level = "1-1"
 ram_encoding = "dataset-cr" # Repairs the source dataset's CR expansion bug.
