@@ -19,7 +19,7 @@ outcome = "all" # Both outcomes provide per-action value examples.
 stride = 4 # Keep every fourth teacher decision; temporal inputs still use adjacent frames.
 max_rows = 50000
 head_rows_per_trajectory = 16 # Prefer each trajectory's opening wait-to-move transition.
-pre_death_frames = 30 # Half a second at 60 FPS; detected pre-death actions receive -1.
+pre_death_frames = 16 # Half a second at 60 FPS; detected pre-death actions receive -1.
 min_progress_delta = 3 # Success needs >=3 pixels forward in one frame and a new progress maximum.
 label_offset = 1 # RAM[f] is post-action state; predict the action for frame f+1.
 include_level = "1-3"
@@ -57,7 +57,7 @@ max_frames = 18000
 action_repeat = 1
 action_selection = "epsilon_sample"
 epsilon = 0.30 # Uniform random action with this probability; otherwise sample the model.
-online_capacity = 64 # Unlabeled transitions per delayed-credit batch.
+online_capacity = 16 # Unlabeled transitions per delayed-credit batch.
 render = false
 record_video = true
 video_fps = 60
