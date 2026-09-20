@@ -46,6 +46,8 @@ class OnlineReplay:
         self.updates = 0
         self.last_refit_seconds = None
         self.episode_death = False
+        self.discarded_neutral_noops = 0
+        self.discarded_duplicates = 0
         self._load()
         if len(self.replay_y):
             self.last_refit_seconds = self._refit()
@@ -74,6 +76,10 @@ class OnlineReplay:
             validate_action(action)
         if not set(map(int, np.unique(values))).issubset({-1, 0, 1}):
             raise ValueError(f"Invalid action values in online replay: {self.path}")
+        X, y, values, discarded_noops = self._without_neutral_noops(X, y, values)
+        X, y, values, discarded_duplicates = self._unique_newest(X, y, values)
+        self.discarded_neutral_noops += discarded_noops
+        self.discarded_duplicates += discarded_duplicates
         self.replay_X = X[-self.capacity :]
         self.replay_y = y[-self.capacity :]
         self.replay_values = values[-self.capacity :]
@@ -84,6 +90,8 @@ class OnlineReplay:
         self.staged_X.clear()
         self.staged_y.clear()
         self.staged_values.clear()
+        self.discarded_neutral_noops = 0
+        self.discarded_duplicates = 0
         self.progress_max = _player_x(checked_ram(initial_ram))
         self.episode_death = False
 
@@ -126,11 +134,20 @@ class OnlineReplay:
         X = np.stack(self.staged_X)
         y = np.asarray(self.staged_y, dtype=np.int64)
         values_array = np.asarray(self.staged_values, dtype=np.int8)
-        self.replay_X = np.concatenate((self.replay_X, X))[-self.capacity :]
-        self.replay_y = np.concatenate((self.replay_y, y))[-self.capacity :]
-        self.replay_values = np.concatenate(
-            (self.replay_values, values_array)
-        )[-self.capacity :]
+        combined_X = np.concatenate((self.replay_X, X))
+        combined_y = np.concatenate((self.replay_y, y))
+        combined_values = np.concatenate((self.replay_values, values_array))
+        combined_X, combined_y, combined_values, discarded_noops = (
+            self._without_neutral_noops(combined_X, combined_y, combined_values)
+        )
+        combined_X, combined_y, combined_values, discarded_duplicates = (
+            self._unique_newest(combined_X, combined_y, combined_values)
+        )
+        self.discarded_neutral_noops += discarded_noops
+        self.discarded_duplicates += discarded_duplicates
+        self.replay_X = combined_X[-self.capacity :]
+        self.replay_y = combined_y[-self.capacity :]
+        self.replay_values = combined_values[-self.capacity :]
         self.progress_max = None
         self.episode_death = False
         self._write()
@@ -147,6 +164,9 @@ class OnlineReplay:
             "action_value_counts": dict(
                 sorted(Counter(map(int, self.replay_values)).items())
             ),
+            "action_counts": dict(sorted(Counter(map(int, self.replay_y)).items())),
+            "discarded_neutral_noops": self.discarded_neutral_noops,
+            "discarded_duplicates": self.discarded_duplicates,
             "refit_seconds": self.last_refit_seconds,
             "refit_performed": bool(refit),
             "updates": self.updates,
@@ -219,4 +239,35 @@ class OnlineReplay:
             "action_value_counts": dict(
                 sorted(Counter(map(int, self.replay_values)).items())
             ),
+            "action_counts": dict(sorted(Counter(map(int, self.replay_y)).items())),
+            "discarded_neutral_noops": self.discarded_neutral_noops,
+            "discarded_duplicates": self.discarded_duplicates,
         }
+
+    @staticmethod
+    def _without_neutral_noops(X, y, values):
+        """Drop self-generated no-button examples that produced no value.
+
+        Replaying these rows turns a sampled stationary mistake into supervised
+        evidence for repeating it. Valuable or pre-death no-ops remain because
+        their conditioning value is respectively 1 or -1.
+        """
+        keep = ~((y == 0) & (values == 0))
+        return X[keep], y[keep], values[keep], int((~keep).sum())
+
+    @staticmethod
+    def _unique_newest(X, y, values):
+        """Keep one copy of an exact transition, preferring the newest copy."""
+        kept = []
+        for index in range(len(y) - 1, -1, -1):
+            duplicate = any(
+                y[index] == y[other]
+                and values[index] == values[other]
+                and np.array_equal(X[index], X[other], equal_nan=True)
+                for other in kept
+            )
+            if not duplicate:
+                kept.append(index)
+        kept.reverse()
+        indices = np.asarray(kept, dtype=np.int64)
+        return X[indices], y[indices], values[indices], len(y) - len(indices)

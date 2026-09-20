@@ -258,8 +258,12 @@ the emulator and policy together, headless.
 ## Between-episode online adaptation
 
 `adapt` is a separate experimental mode. Within each episode the policy stays
-frozen. Every applied action and adjacent RAM transition is collected, labeled
-with the same `-1/0/1` rules used by preparation, and staged in bounded memory.
+frozen. Applied actions and adjacent RAM transitions are labeled with the same
+`-1/0/1` rules used by preparation and staged in bounded memory. Neutral no-op
+self-loops are not replayed: otherwise a sampled stationary mistake becomes
+supervised evidence for repeating that mistake. Exact duplicate transitions are
+also collapsed, keeping the newest copy. Valuable (`1`) and pre-death (`-1`)
+no-ops remain available to the value-conditioned model.
 At episode end, the newest rows are appended to a persistent FIFO replay cache,
 the cache is capped at `adapt.online_capacity`, and TabPFN is refit once on the
 original prepared context plus that replay. The saved base policy is never

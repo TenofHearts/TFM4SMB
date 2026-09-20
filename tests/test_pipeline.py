@@ -506,6 +506,52 @@ class ActionAndRolloutTests(unittest.TestCase):
 
 
 class OnlineReplayTests(unittest.TestCase):
+    def test_replay_discards_neutral_noops_and_exact_duplicates(self):
+        class Policy:
+            def __init__(self):
+                self.refits = []
+
+            def refit_context(self, X, y):
+                self.refits.append((X.copy(), y.copy()))
+                return 0.5
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            for number, action in ((1, 20), (2, 148), (3, 20), (4, 148)):
+                ram = game_ram()
+                ram[0x86] = number
+                path = data / f"p_s_e0_1-1_f{number}_a{action}_date.win.png"
+                path.write_bytes(png_bytes(ram, action))
+            context = root / "context.npz"
+            prepare(data, context, stride=1, max_rows=10, label_offset=0)
+
+            policy = Policy()
+            replay = OnlineReplay(
+                policy,
+                context,
+                root / "online.npz",
+                capacity=8,
+                pre_death_frames=2,
+            )
+            stationary = game_ram()
+            replay.begin_episode(stationary)
+            for _ in range(4):
+                replay.observe(stationary, stationary, 0, stationary)
+            replay.observe(stationary, stationary, 16, stationary)
+            replay.observe(stationary, stationary, 16, stationary)
+            moving = stationary.copy()
+            moving[0x86] += 1
+            replay.observe(stationary, stationary, 20, moving)
+
+            update = replay.end_episode()
+            self.assertEqual(update["cache_rows"], 2)
+            self.assertEqual(update["action_counts"], {16: 1, 20: 1})
+            self.assertEqual(update["discarded_neutral_noops"], 4)
+            self.assertEqual(update["discarded_duplicates"], 1)
+            self.assertEqual(policy.refits[-1][1][-1], 20)
+
     def test_replay_is_bounded_and_refits_only_after_episode(self):
         class Policy:
             def __init__(self):
