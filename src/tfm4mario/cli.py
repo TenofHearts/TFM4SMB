@@ -109,13 +109,10 @@ def parser():
         command.add_argument("--action-repeat", type=positive, default=1)
         command.add_argument(
             "--action-selection",
-            choices=["sample", "argmax", "epsilon_greedy"],
+            choices=["sample", "argmax", "epsilon_sample"],
             default="sample",
         )
-        command.add_argument("--epsilon", type=probability, default=0.1)
-        command.add_argument(
-            "--confidence-threshold", type=probability, default=0.5
-        )
+        command.add_argument("--epsilon", type=probability, default=0.3)
         command.add_argument("--seed", type=int, default=0)
         command.add_argument(
             "--render", action=argparse.BooleanOptionalAction, default=False
@@ -276,7 +273,6 @@ def main():
                 render=args.render,
                 action_selection=args.action_selection,
                 epsilon=args.epsilon,
-                confidence_threshold=args.confidence_threshold,
                 record_video=args.record_video,
                 video_fps=args.video_fps,
                 online=online,

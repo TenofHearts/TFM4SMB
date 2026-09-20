@@ -393,7 +393,7 @@ class DatasetTests(unittest.TestCase):
 
 
 class ActionAndRolloutTests(unittest.TestCase):
-    def test_confidence_gated_epsilon_greedy(self):
+    def test_unconditional_epsilon_sampling(self):
         class Model:
             classes_ = np.asarray([0, 20, 148])
 
@@ -408,24 +408,22 @@ class ActionAndRolloutTests(unittest.TestCase):
         policy.model = Model([0.40, 0.35, 0.25])
         explored = policy.predict_ram(
             game_ram(),
-            selection="epsilon_greedy",
+            selection="epsilon_sample",
             epsilon=1.0,
-            confidence_threshold=0.5,
             rng=np.random.default_rng(3),
         )
         self.assertTrue(explored["explored"])
         self.assertEqual(explored["max_confidence"], 0.4)
 
-        policy.model = Model([0.60, 0.25, 0.15])
-        greedy = policy.predict_ram(
+        policy.model = Model([0.0, 1.0, 0.0])
+        sampled = policy.predict_ram(
             game_ram(),
-            selection="epsilon_greedy",
-            epsilon=1.0,
-            confidence_threshold=0.5,
+            selection="epsilon_sample",
+            epsilon=0.0,
             rng=np.random.default_rng(3),
         )
-        self.assertFalse(greedy["explored"])
-        self.assertEqual(greedy["action"], 0)
+        self.assertFalse(sampled["explored"])
+        self.assertEqual(sampled["action"], 20)
 
     def test_action_translation(self):
         self.assertEqual(button_names(148), ["A", "B", "right"])

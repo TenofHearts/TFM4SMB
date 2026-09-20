@@ -240,10 +240,10 @@ decision = policy.predict_ram(ram_bytes, action_value=1)  # exactly 2048 bytes
 The emulator waits while TabPFN predicts, so slow inference makes gameplay slower
 in wall-clock time rather than dropping actions. Default action repeat is one.
 `--action-repeat 4` deliberately changes the control policy; it is an experiment,
-not a transparent speed optimization. Rollouts use reproducible probability
-sampling by default because argmax can repeatedly choose the modal wait action in
-ambiguous states and never leave them. Set `play.action_selection = "argmax"` for
-a deterministic mode-policy comparison. Each episode writes a decision JSONL trace
+not a transparent speed optimization. Probability-based modes avoid the argmax
+failure in which an ambiguous state repeatedly selects the modal wait action and
+never changes. Set `play.action_selection = "argmax"` only for a deterministic
+mode-policy comparison. Each episode writes a decision JSONL trace
 and summary with completion flag, progress, reward, stop reason and p50/p95
 prediction latency. A recorded video uses emulator frames at `play.video_fps`, so
 slow model inference does not create pauses in the MP4. Repeated resets may be deterministic; multiple identical
@@ -294,13 +294,13 @@ caused that result. CPU refits may pause for a substantial time between episodes
 Compare the per-episode metrics rather than treating one stochastic run as proof
 of improvement.
 
-The configured `play` and `adapt` modes use confidence-gated epsilon-greedy
-selection. The greedy action is used whenever maximum class probability is at
-least `0.50`. Below that threshold, `play` chooses a uniformly random known
-action with probability `0.10`, while `adapt` uses `0.70`; otherwise each uses
-the greedy action. Traces and summaries report low-confidence and exploratory
-decision counts. This explores only actions already present in the fitted
-model's class set.
+The configured `play` and `adapt` modes use unconditional epsilon-sampling. On
+every decision they choose a uniformly random known action with probability
+`0.30`; otherwise they sample from the model's predicted class probabilities.
+There is no confidence threshold and no greedy fallback, so a confident no-op
+cannot create a permanent fixed point. Traces and summaries report exploratory
+decision counts. Uniform exploration uses only actions already present in the
+fitted model's class set.
 
 ## Optional evaluation and checks
 
