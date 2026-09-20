@@ -43,7 +43,11 @@ def parser():
         default=1,
         help="1: RAM[f] -> next action (default); 0: reconstruct applied action",
     )
-    prep.add_argument(
+    levels = prep.add_mutually_exclusive_group()
+    levels.add_argument(
+        "--include-level", help="Use only one world-level, for example 1-1"
+    )
+    levels.add_argument(
         "--exclude-level", help="Exclude one world-level, for example 8-4"
     )
     prep.add_argument(
@@ -101,23 +105,36 @@ def parser():
     ev.add_argument("--data", type=Path)
     ev.add_argument("--device", default="auto")
     ev.add_argument("--batch-size", type=positive, default=128)
-    play = sub.add_parser("play", help="Run a synchronous Mario rollout")
-    play.add_argument("--model", type=Path)
-    play.add_argument("--env-id", default="SuperMarioBros-1-1-v0")
-    play.add_argument("--output", type=Path)
-    play.add_argument("--device", default="auto")
-    play.add_argument("--episodes", type=positive, default=1)
-    play.add_argument("--max-frames", type=positive, default=18000)
-    play.add_argument("--action-repeat", type=positive, default=1)
-    play.add_argument(
-        "--action-selection", choices=["sample", "argmax"], default="sample"
+    def add_game_arguments(command, *, default_episodes):
+        command.add_argument("--model", type=Path)
+        command.add_argument("--env-id", default="SuperMarioBros-1-1-v0")
+        command.add_argument("--output", type=Path)
+        command.add_argument("--device", default="auto")
+        command.add_argument("--episodes", type=positive, default=default_episodes)
+        command.add_argument("--max-frames", type=positive, default=18000)
+        command.add_argument("--action-repeat", type=positive, default=1)
+        command.add_argument(
+            "--action-selection", choices=["sample", "argmax"], default="sample"
+        )
+        command.add_argument("--seed", type=int, default=0)
+        command.add_argument(
+            "--render", action=argparse.BooleanOptionalAction, default=False
+        )
+        command.add_argument(
+            "--record-video", action=argparse.BooleanOptionalAction, default=False
+        )
+        command.add_argument("--video-fps", type=positive, default=60)
+
+    play = sub.add_parser("play", help="Run a frozen-policy Mario rollout")
+    add_game_arguments(play, default_episodes=1)
+    adapt = sub.add_parser(
+        "adapt", help="Run episodes with bounded replay and between-episode refits"
     )
-    play.add_argument("--seed", type=int, default=0)
-    play.add_argument("--render", action=argparse.BooleanOptionalAction, default=False)
-    play.add_argument(
-        "--record-video", action=argparse.BooleanOptionalAction, default=False
-    )
-    play.add_argument("--video-fps", type=positive, default=60)
+    add_game_arguments(adapt, default_episodes=5)
+    adapt.add_argument("--context", type=Path)
+    adapt.add_argument("--online-cache", type=Path)
+    adapt.add_argument("--online-capacity", type=positive, default=256)
+    adapt.add_argument("--pre-death-frames", type=positive, default=30)
     doctor = sub.add_parser(
         "doctor", help="Inspect compute and optionally exercise an emulator"
     )
@@ -130,6 +147,7 @@ def parser():
         "predict": predict,
         "evaluate": ev,
         "play": play,
+        "adapt": adapt,
         "doctor": doctor,
     }
     for command in commands.values():
@@ -160,6 +178,7 @@ def parse_args(argv=None):
         "predict": ["model"],
         "evaluate": ["model", "data"],
         "play": ["model", "output"],
+        "adapt": ["model", "context", "online_cache", "output"],
         "doctor": [],
     }
     for name in required[args.command]:
@@ -201,6 +220,7 @@ def main():
             seed=args.seed,
             label_offset=args.label_offset,
             encoding=args.ram_encoding,
+            include_level=args.include_level,
             exclude_level=args.exclude_level,
             head_rows_per_trajectory=args.head_rows_per_trajectory,
             max_action_share=args.max_action_share,
@@ -218,7 +238,7 @@ def main():
             seed=args.seed,
             model_path=args.model_path,
         )
-    elif args.command in {"predict", "evaluate", "play"}:
+    elif args.command in {"predict", "evaluate", "play", "adapt"}:
         from .policy import Policy, evaluate
 
         policy = Policy(args.model, args.device)
@@ -236,6 +256,18 @@ def main():
         else:
             from .game import play
 
+            online = None
+            if args.command == "adapt":
+                from .online import OnlineReplay
+
+                online = OnlineReplay(
+                    policy,
+                    args.context,
+                    args.online_cache,
+                    capacity=args.online_capacity,
+                    pre_death_frames=args.pre_death_frames,
+                )
+
             result = play(
                 policy,
                 args.env_id,
@@ -248,6 +280,7 @@ def main():
                 action_selection=args.action_selection,
                 record_video=args.record_video,
                 video_fps=args.video_fps,
+                online=online,
             )
     else:
         import torch

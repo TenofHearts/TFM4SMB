@@ -4,8 +4,9 @@ A RAM-based imitation policy using successful and failed trajectories cached by
 `data_selection.py`. The pipeline prepares a compact context table, fits an
 explicit TabPFN **v3.5** classifier, saves it, and predicts controller actions
 from live NES RAM. Each sample conditions on two consecutive frames and a desired
-per-action value. The configured held-out level is explicitly excluded from the
-context and reserved for emulator testing.
+per-action value. The supplied configuration deliberately restricts both
+training and live evaluation to level 1-3; it measures same-level control rather
+than cross-level generalization.
 
 `train` performs TabPFN context fitting, **not gradient fine-tuning or reinforcement
 learning**. Successful demonstrations do not establish that the resulting policy
@@ -36,8 +37,8 @@ separate non-commercial license; check the
 license in the Licenses tab, then obtain your API key from the Account page.
 For non-interactive training, set `TABPFN_TOKEN` in your process environment.
 Do not save credentials in `config.toml` or commit them. An interactive terminal
-may guide you through authentication instead. Checkpoint-backed fitting and a
-held-out 8-4 emulator rollout have been validated in this workspace.
+may guide you through authentication instead. Checkpoint-backed fitting and
+emulator rollout plumbing have been validated in this workspace.
 For offline execution, set `train.model_path` in `config.toml` to your local
 `tabpfn-v3.5-20260909.safetensors` file.
 This must be the v3.5 checkpoint. A fitted archive omits the foundation weights,
@@ -72,16 +73,19 @@ If an episode's embedded `OUTCOME` disagrees with its filename, extraction
 discards that entire trajectory and records it under `skipped_trajectories` in
 the manifest and final report. Other metadata or RAM corruption remains fatal.
 
-Set `prepare.exclude_level` to the held-out world-level. The supplied config uses
-`"8-4"`; filtering happens while the context is built, so the complete metadata
-cache can remain intact. Point `paths.selected_data` at the cache directory.
+Set `prepare.include_level` to the sole world-level used for training. The
+supplied config uses `"1-3"`; filtering happens while the context is built, so
+the complete metadata cache can remain intact. `include_level` and
+`exclude_level` are mutually exclusive. Point `paths.selected_data` at the cache
+directory.
 Inputs are read-only and existing context artifacts are never overwritten.
 
 Preparation selects both winning and failed trajectories by default and sorts
 frame numbers numerically within each episode. Candidate rows are stratified by
 target action and drawn round-robin across trajectory IDs. `max_action_share`
 places a hard ceiling on the selected fraction of any single action; preparation
-fails with an explanation if the available action classes cannot satisfy it.
+uses the largest feasible row count at or below `max_rows`, discarding excess
+modal-action rows when the complete candidate set cannot satisfy the cap.
 Opening candidates are preferred within each trajectory. Non-controllable states
 are removed before selection.
 `--stride 4` reduces context redundancy; it does **not** cause
@@ -221,7 +225,7 @@ decision = policy.predict_ram(ram_bytes, action_value=1)  # exactly 2048 bytes
    installation recipes into this environment. If native emulator installation
    fails on your machine, use a Linux server/WSL and send the build error.
 3. Confirm `doctor` reports `ram_bytes: 2048`, `features: 409`, and the intended
-   device. Set `play.env_id` to your held-out world and level.
+   device. `play.env_id` must name the same level as `prepare.include_level`.
 4. Run headless on a server, or set `play.render = true` on a machine with a display.
    Set `play.record_video = true` to write `episode-000.mp4` inside the configured
    rollout directory; this requires FFmpeg on `PATH`. Live display and recording
@@ -249,14 +253,43 @@ extractor and explicit button translation. A remote inference service is not
 required: copy this project and the selected context to the GPU machine and run
 the emulator and policy together, headless.
 
+## Between-episode online adaptation
+
+`adapt` is a separate experimental mode. Within each episode the policy stays
+frozen. Every applied action and adjacent RAM transition is collected, labeled
+with the same `-1/0/1` rules used by preparation, and staged in bounded memory.
+At episode end, the newest rows are appended to a persistent FIFO replay cache,
+the cache is capped at `adapt.online_capacity`, and TabPFN is refit once on the
+original prepared context plus that replay. The saved base policy is never
+overwritten. The final episode persists its new replay rows but skips an
+unnecessary refit; a later invocation applies that cache before its first episode.
+
+```powershell
+uv run tfm4mario adapt
+```
+
+The supplied configuration runs five consecutive 1-3 episodes. Each episode
+writes its own JSONL trace and MP4, while `summary.json` accumulates reward,
+progress, completion, replay size, action-value counts, and refit duration. The
+next episode uses the updated in-memory context. On later invocations, the
+persistent replay is loaded and applied before episode one. Choose a fresh
+`paths.adaptive_rollout` directory for every invocation; retain the same
+`paths.online_cache` to continue adapting, or choose a new cache for an
+independent experiment.
+
+This is supervised online adaptation, not full reinforcement learning: it has no
+learned value function, policy-gradient objective, or explicit exploration
+bonus. CPU refits may pause for a substantial time between episodes. Compare the
+per-episode metrics rather than treating one stochastic run as proof of
+improvement.
+
 ## Optional evaluation and checks
 
-The configured live evaluation uses the actual 8-4 emulator. If you also want
-offline action metrics, create a separate metadata-cache directory containing
-only the 8-4 episode shards. Copy the config to `heldout.toml`, point
-`paths.selected_data` at that directory, set `paths.context` to
-`artifacts/heldout-v4.npz`, remove `prepare.exclude_level`, and set the outcome you
-want. Run preparation with that config, then evaluation with the original config:
+The configured live evaluation runs the same 1-3 level used for training. This is
+not evidence of cross-level generalization. For an honest offline same-level
+metric, split complete 1-3 trajectory IDs into disjoint training and evaluation
+sets; never randomly split rows from the same trajectory. Point a copied config
+at the evaluation cache and a fresh context path, then run:
 
 ```powershell
 uv run tfm4mario prepare --config heldout.toml

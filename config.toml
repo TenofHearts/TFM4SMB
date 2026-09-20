@@ -2,15 +2,17 @@
 # Relative paths resolve beside this file, not the shell's working directory.
 
 [paths]
-selected_data = "processed_data/metadata_cache" # Cached win/fail trajectories; exclude held-out levels during preparation.
-context = "artifacts/context-1-1-v4.npz"
-model = "artifacts/policy-1-1-v4"
+selected_data = "processed_data/metadata_cache" # Cached win/fail trajectories; preparation selects level 1-3 only.
+context = "artifacts/context-1-3-v4.npz"
+model = "artifacts/policy-1-3-v4"
 evaluation = "artifacts/heldout-v4.npz"
-rollout = "artifacts/rollout-1-1-v4" # Choose a new directory for each run.
+rollout = "artifacts/rollout-1-3-42-v4" # Choose a new directory for each run.
+adaptive_rollout = "artifacts/adapt-1-3-42-v4" # One trace/video per adaptive episode.
+online_cache = "artifacts/online-replay-1-3-v4.npz" # Bounded persistent experience.
 
 [runtime]
 device = "auto" # "cpu", "cuda", or "auto"; check with: uv run tfm4mario doctor
-seed = 0
+seed = 42
 
 [prepare]
 outcome = "all" # Both outcomes provide per-action value examples.
@@ -20,7 +22,7 @@ head_rows_per_trajectory = 16 # Prefer each trajectory's opening wait-to-move tr
 max_action_share = 0.40 # Action-balanced trajectory sampling caps every action at 40%.
 pre_death_frames = 30 # Half a second at 60 FPS; detected pre-death actions receive -1.
 label_offset = 1 # RAM[f] is post-action state; predict the action for frame f+1.
-exclude_level = "1-1"
+include_level = "1-3"
 ram_encoding = "dataset-cr" # Repairs the source dataset's CR expansion bug.
 
 [train]
@@ -38,7 +40,7 @@ ram_encoding = "dataset-cr" # Only applies to PNG trailers, never raw dumps.
 batch_size = 128
 
 [play]
-env_id = "SuperMarioBros-8-4-v0"
+env_id = "SuperMarioBros-1-3-v0"
 episodes = 1
 max_frames = 18000
 action_repeat = 1 # Increasing this changes control behavior; start at one.
@@ -47,6 +49,18 @@ render = false # true for a local display, false on a headless server.
 record_video = true # Write episode-000.mp4 without opening a display.
 video_fps = 60 # NES playback rate; model inference latency is not encoded.
 
+[adapt]
+env_id = "SuperMarioBros-1-3-v0"
+episodes = 5 # Policy is frozen within each episode and refit once between episodes.
+max_frames = 18000
+action_repeat = 1
+action_selection = "sample"
+online_capacity = 256 # FIFO replay rows retained across episodes.
+pre_death_frames = 30
+render = false
+record_video = true
+video_fps = 60
+
 [doctor]
 # Uncomment after installing the game extra to check RAM access and stepping:
-env_id = "SuperMarioBros-8-4-v0"
+env_id = "SuperMarioBros-1-3-v0"

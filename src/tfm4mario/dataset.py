@@ -96,14 +96,29 @@ def _balanced_quotas(availability, total, max_action_share):
     return quotas
 
 
+def _largest_balanced_total(availability, requested, max_action_share):
+    """Use the largest available context for which the hard cap is feasible."""
+    for total in range(requested, 0, -1):
+        ceiling = int(np.floor(total * max_action_share))
+        if ceiling >= 1 and sum(
+            min(count, ceiling) for count in availability.values()
+        ) >= total:
+            return total
+    raise ValueError(
+        f"No nonempty selection can satisfy max_action_share={max_action_share} "
+        f"for action availability {dict(sorted(availability.items()))}"
+    )
+
+
 def _select_trajectory_rows(candidates, max_rows, max_action_share, rng):
     """Action-stratified sampling, round-robin across trajectory IDs."""
-    total = min(max_rows, sum(map(len, candidates.values())))
     availability = Counter(
         item[1].action
         for episode_candidates in candidates.values()
         for item in episode_candidates
     )
+    requested = min(max_rows, sum(availability.values()))
+    total = _largest_balanced_total(availability, requested, max_action_share)
     quotas = _balanced_quotas(availability, total, max_action_share)
     selected = []
     for action, quota in sorted(quotas.items()):
@@ -133,14 +148,19 @@ def _select_trajectory_rows(candidates, max_rows, max_action_share, rng):
     return selected, availability, quotas
 
 
-def discover(root: Path, outcome: str, cache=None, exclude_level=None):
+def discover(
+    root: Path, outcome: str, cache=None, include_level=None, exclude_level=None
+):
     episodes = {}
     paths = cache.frames(outcome) if cache else sorted(root.rglob("*.png"))
     for item in paths:
         frame = item if cache else parse_frame(item)
         if not cache and outcome != "all" and frame.outcome != outcome:
             continue
-        if exclude_level == f"{frame.world}-{frame.level}":
+        level = f"{frame.world}-{frame.level}"
+        if include_level is not None and include_level != level:
+            continue
+        if exclude_level == level:
             continue
         episodes.setdefault((frame.episode, frame.outcome), []).append(frame)
     if not episodes:
@@ -162,6 +182,7 @@ def prepare(
     seed=0,
     label_offset=1,
     encoding="dataset-cr",
+    include_level=None,
     exclude_level=None,
     head_rows_per_trajectory=16,
     max_action_share=0.50,
@@ -182,15 +203,15 @@ def prepare(
             "label_offset must be 0 or 1; max_action_share must be in (0, 1]; "
             "pre_death_frames must be positive"
         )
-    if (
-        exclude_level is not None
-        and re.fullmatch(r"[1-8]-[1-4]", exclude_level) is None
-    ):
-        raise ValueError("exclude_level must look like 8-4")
+    if include_level is not None and exclude_level is not None:
+        raise ValueError("include_level and exclude_level are mutually exclusive")
+    for name, level in (("include_level", include_level), ("exclude_level", exclude_level)):
+        if level is not None and re.fullmatch(r"[1-8]-[1-4]", level) is None:
+            raise ValueError(f"{name} must look like 1-1")
     cache = MetadataCache(root) if (root / MANIFEST).is_file() else None
     if cache and cache.info.get("ram_encoding") != encoding:
         raise ValueError("Requested RAM encoding differs from the metadata cache")
-    episodes = discover(root, outcome, cache, exclude_level)
+    episodes = discover(root, outcome, cache, include_level, exclude_level)
     # Build per-trajectory candidate queues. Selection below caps action share and
     # round-robins trajectory IDs, so neither long episodes nor modal actions can
     # consume the context merely because they have more frames.
@@ -311,6 +332,7 @@ def prepare(
         "outcome": outcome,
         "stride": stride,
         "label_offset": label_offset,
+        "included_level": include_level,
         "excluded_level": exclude_level,
         "ram_encoding": encoding,
         "max_rows": max_rows,
@@ -329,6 +351,7 @@ def prepare(
         "seed": seed,
         "eligible_pairs": eligible,
         "selected_rows": len(rows),
+        "balance_discarded_rows": eligible - len(rows),
         "trajectory_count": len(set(episode_ids)),
         "outcome_counts": dict(sorted(Counter(outcomes).items())),
         "action_value_counts": dict(sorted(Counter(action_values).items())),

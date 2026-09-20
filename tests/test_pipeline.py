@@ -21,6 +21,7 @@ from tfm4mario.features import (
 )
 from tfm4mario.game import rollout
 from tfm4mario.metadata_cache import build_cache
+from tfm4mario.online import OnlineReplay
 from tfm4mario.ram import (
     PNG_SIGNATURE,
     OutcomeMismatchError,
@@ -255,6 +256,25 @@ class DatasetTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "exclude_level"):
                 prepare(data, root / "bad.npz", exclude_level="world-8")
 
+            included = root / "included.npz"
+            metadata = prepare(
+                data,
+                included,
+                stride=1,
+                max_rows=100,
+                label_offset=0,
+                include_level="8-4",
+            )
+            self.assertEqual(metadata["levels"], ["8-4"])
+            self.assertEqual(metadata["included_level"], "8-4")
+            with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+                prepare(
+                    data,
+                    root / "both.npz",
+                    include_level="1-1",
+                    exclude_level="8-4",
+                )
+
     def test_opening_rows_are_preferred_during_balanced_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -278,6 +298,29 @@ class DatasetTests(unittest.TestCase):
                 self.assertIn((episode, 2), selected)
             self.assertEqual(metadata["priority_rows"], 4)
             self.assertEqual(loaded["effective_head_rows_per_trajectory"], 2)
+
+    def test_balancing_can_reduce_a_small_level_context(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            for number in range(1, 11):
+                ram = game_ram()
+                action = 20 if number <= 7 else 148
+                path = data / f"p_s_e0_1-1_f{number}_a{action}_date.win.png"
+                path.write_bytes(png_bytes(ram, action))
+            metadata = prepare(
+                data,
+                root / "balanced.npz",
+                stride=1,
+                max_rows=100,
+                label_offset=0,
+                include_level="1-1",
+                max_action_share=0.5,
+            )
+            self.assertEqual(metadata["selected_rows"], 6)
+            self.assertEqual(metadata["action_counts"], {20: 3, 148: 3})
+            self.assertEqual(metadata["balance_discarded_rows"], 4)
 
     def test_per_action_values_and_action_cap_are_applied(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -398,6 +441,73 @@ class ActionAndRolloutTests(unittest.TestCase):
         result = rollout(Env(), Policy(), max_frames=5, video=video)
         self.assertEqual(result["frames"], 2)
         self.assertEqual([int(frame[0, 0, 0]) for frame in video.frames], [0, 1, 2])
+
+
+class OnlineReplayTests(unittest.TestCase):
+    def test_replay_is_bounded_and_refits_only_after_episode(self):
+        class Policy:
+            def __init__(self):
+                self.refits = []
+
+            def refit_context(self, X, y):
+                self.refits.append((X.copy(), y.copy()))
+                return 1.25
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            for number, action in ((1, 20), (2, 148), (3, 20), (4, 148)):
+                ram = game_ram()
+                ram[0x86] = number
+                path = data / f"p_s_e0_1-1_f{number}_a{action}_date.win.png"
+                path.write_bytes(png_bytes(ram, action))
+            context = root / "context.npz"
+            prepare(data, context, stride=1, max_rows=10, label_offset=0)
+
+            policy = Policy()
+            cache = root / "online.npz"
+            replay = OnlineReplay(
+                policy, context, cache, capacity=4, pre_death_frames=2
+            )
+            initial = game_ram()
+            replay.begin_episode(initial)
+            previous = initial.copy()
+            for index in range(5):
+                current = game_ram()
+                after = game_ram()
+                current[0x86] = index
+                after[0x86] = index + 1
+                if index == 4:
+                    after[0x0E] = 0x0B
+                replay.observe(
+                    previous,
+                    current,
+                    20 if index % 2 == 0 else 148,
+                    after,
+                    death=index == 4,
+                )
+                previous = current
+            self.assertEqual(policy.refits, [])
+            update = replay.end_episode(death=True)
+            self.assertEqual(len(policy.refits), 1)
+            self.assertEqual(update["cache_rows"], 4)
+            self.assertEqual(update["action_value_counts"], {-1: 2, 1: 2})
+            with np.load(cache, allow_pickle=False) as saved:
+                self.assertEqual(saved["X"].shape, (4, len(FEATURE_NAMES)))
+                np.testing.assert_array_equal(saved["action_values"], [1, 1, -1, -1])
+
+            restored_policy = Policy()
+            restored = OnlineReplay(
+                restored_policy, context, cache, capacity=4, pre_death_frames=2
+            )
+            self.assertEqual(len(restored_policy.refits), 1)
+            self.assertEqual(restored.summary()["cache_rows"], 4)
+            restored.begin_episode(initial)
+            restored.observe(initial, initial, 20, initial)
+            final_update = restored.end_episode(refit=False)
+            self.assertFalse(final_update["refit_performed"])
+            self.assertEqual(len(restored_policy.refits), 1)
 
 
 if __name__ == "__main__":

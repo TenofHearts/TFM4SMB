@@ -6,19 +6,22 @@ import tomllib
 
 PATH_TARGETS = {
     "selected_data": [("prepare", "data")],
-    "context": [("prepare", "output"), ("train", "context")],
+    "context": [("prepare", "output"), ("train", "context"), ("adapt", "context")],
     "model": [
         ("train", "output"),
         ("predict", "model"),
         ("evaluate", "model"),
         ("play", "model"),
+        ("adapt", "model"),
     ],
     "evaluation": [("evaluate", "data")],
     "rollout": [("play", "output")],
+    "adaptive_rollout": [("adapt", "output")],
+    "online_cache": [("adapt", "online_cache")],
 }
 RUNTIME_TARGETS = {
-    "device": ["train", "predict", "evaluate", "play"],
-    "seed": ["prepare", "train", "play"],
+    "device": ["train", "predict", "evaluate", "play", "adapt"],
+    "seed": ["prepare", "train", "play", "adapt"],
 }
 
 

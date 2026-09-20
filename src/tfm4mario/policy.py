@@ -107,6 +107,15 @@ class Policy:
         """Forget temporal context at an episode boundary."""
         self._previous_ram = None
 
+    def refit_context(self, X, y):
+        """Replace the in-memory TabPFN context; the saved model is unchanged."""
+        if X.shape != (len(y), len(FEATURE_NAMES)) or not len(y):
+            raise ValueError("Invalid online refit context dimensions")
+        started = time.perf_counter()
+        self.model.fit(X, y)
+        self.manifest["classes"] = [int(value) for value in self.model.classes_]
+        return time.perf_counter() - started
+
     def predict_ram(
         self, ram, *, previous_ram=None, action_value=1, selection="argmax", rng=None
     ):

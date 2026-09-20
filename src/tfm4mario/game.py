@@ -145,6 +145,8 @@ def rollout(
     action_selection="sample",
     trace=None,
     video=None,
+    online=None,
+    online_refit=True,
 ):
     if max_frames < 1 or action_repeat < 1:
         raise ValueError("max_frames/action_repeat must be positive")
@@ -160,6 +162,9 @@ def rollout(
     started = time.perf_counter()
     rng = np.random.default_rng(seed)
     previous_ram = None
+    initial_ram = get_ram(env)
+    if online is not None:
+        online.begin_episode(initial_ram)
     if video is not None:
         video.write(env.render())
     while frames < max_frames and not (terminated or truncated or flag_get):
@@ -178,10 +183,21 @@ def rollout(
             # Preserve the state immediately before the last emulated step.  At
             # the next decision it is exactly one frame behind current RAM even
             # when action_repeat is greater than one.
-            previous_ram = get_ram(env)
+            before_step = get_ram(env)
+            history_ram = before_step if previous_ram is None else previous_ram
             reward, terminated, truncated, info = step_env(
                 env, to_nes_action(decision["action"])
             )
+            after_step = get_ram(env)
+            if online is not None:
+                online.observe(
+                    history_ram,
+                    before_step,
+                    decision["action"],
+                    after_step,
+                    death=bool(info.get("death", False)),
+                )
+            previous_ram = before_step
             reward_total += reward
             frames += 1
             if video is not None:
@@ -203,7 +219,13 @@ def rollout(
                 + "\n"
             )
             trace.flush()
-    return {
+    online_update = None
+    if online is not None:
+        online_update = online.end_episode(
+            death=bool(info.get("death", False) or _is_death_ram(get_ram(env))),
+            refit=online_refit,
+        )
+    result = {
         "frames": frames,
         "decisions": decisions,
         "reward": reward_total,
@@ -221,6 +243,14 @@ def rollout(
         "action_repeat": action_repeat,
         "action_selection": action_selection,
     }
+    if online is not None:
+        result["online_update"] = online_update
+        result["online_replay"] = online.summary()
+    return result
+
+
+def _is_death_ram(ram):
+    return int(ram[0x0E]) in {0x06, 0x0B} or int(ram[0xB5]) > 1
 
 
 def play(
@@ -236,6 +266,7 @@ def play(
     action_selection="sample",
     record_video=False,
     video_fps=60,
+    online=None,
 ):
     if episodes < 1:
         raise ValueError("episodes must be positive")
@@ -261,6 +292,8 @@ def play(
                         action_selection=action_selection,
                         trace=trace,
                         video=recorder,
+                        online=online,
+                        online_refit=index < episodes - 1,
                     )
             finally:
                 if recorder is not None:
