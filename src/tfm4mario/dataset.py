@@ -13,6 +13,47 @@ from .metadata_cache import MANIFEST, MetadataCache
 from .ram import parse_frame, read_frame
 
 
+def _player_x(ram):
+    return int(ram[0x6D]) * 256 + int(ram[0x86])
+
+
+def _decimal_counter(ram, start, length):
+    value = 0
+    for digit in ram[start : start + length]:
+        value = value * 10 + int(digit)
+    return value
+
+
+def _is_death_state(ram):
+    return int(ram[0x0E]) in {0x06, 0x0B} or int(ram[0xB5]) > 1
+
+
+def _death_frame(frames, read_ram):
+    """Find the start of the final contiguous death-state block, if present."""
+    onset = None
+    for frame in reversed(frames):
+        if _is_death_state(read_ram(frame)):
+            onset = frame.number
+        elif onset is not None:
+            break
+    return onset
+
+
+def _action_value(before, after, progress_max, effect_frame, death_frame, window):
+    if (
+        death_frame is not None
+        and effect_frame <= death_frame
+        and death_frame - effect_frame < window
+    ):
+        return -1
+    useful_progress = _player_x(after) > progress_max
+    score_gain = _decimal_counter(after, 0x7DE, 6) > _decimal_counter(
+        before, 0x7DE, 6
+    )
+    powerup_gain = int(after[0x756]) > int(before[0x756])
+    return int(useful_progress or score_gain or powerup_gain)
+
+
 def _balanced_quotas(availability, total, max_action_share):
     """Allocate a proportional row budget with a hard per-action ceiling."""
     ceiling = int(np.floor(total * max_action_share))
@@ -124,6 +165,7 @@ def prepare(
     exclude_level=None,
     head_rows_per_trajectory=16,
     max_action_share=0.50,
+    pre_death_frames=30,
 ):
     if output.exists():
         raise FileExistsError(f"Output exists; choose a new path: {output}")
@@ -133,10 +175,12 @@ def prepare(
         or head_rows_per_trajectory < 0
         or label_offset not in (0, 1)
         or not 0 < max_action_share <= 1
+        or pre_death_frames < 1
     ):
         raise ValueError(
             "stride/max_rows must be positive; head rows must be nonnegative; "
-            "label_offset must be 0 or 1; max_action_share must be in (0, 1]"
+            "label_offset must be 0 or 1; max_action_share must be in (0, 1]; "
+            "pre_death_frames must be positive"
         )
     if (
         exclude_level is not None
@@ -154,13 +198,21 @@ def prepare(
     effective_head = head_rows_per_trajectory
     candidates = {}
     frame_lookup = {}
+    death_frames = {}
     eligible = 0
     counts = Counter()
     for episode_key, frames in episodes.items():
         by_number = {frame.number: frame for frame in frames}
         frame_lookup[episode_key] = by_number
+        read_ram = (
+            cache.ram if cache else lambda frame: read_frame(frame, encoding)
+        )
+        death_frames[episode_key] = (
+            _death_frame(frames, read_ram) if episode_key[1] == "fail" else None
+        )
         episode_head = 0
         episode_candidates = []
+        progress_max = -1
         for source in frames[::stride]:
             target = by_number.get(source.number + label_offset)
             if target is None:
@@ -177,10 +229,14 @@ def prepare(
                 continue
             eligible += 1
             is_head = episode_head < effective_head
+            progress_before = progress_max
+            progress_max = max(progress_max, _player_x(ram))
             # Keep only lightweight frame records until selection. Retaining RAM
             # for every candidate would scale to multiple gigabytes on the full
             # cache even though only max_rows samples can reach the output.
-            episode_candidates.append((source, target, is_head))
+            episode_candidates.append(
+                (source, target, is_head, progress_before, progress_max)
+            )
             episode_head += 1
         if episode_candidates:
             candidates[episode_key] = episode_candidates
@@ -198,18 +254,33 @@ def prepare(
         [],
     )
     outcomes = []
-    for source, target, _ in selected:
-        if not cache and source.path != target.path:
-            read_frame(target, encoding)  # validate the label's own BP1/outcome
+    action_values = []
+    for source, target, _, progress_before, progress_through_source in selected:
         ram = cache.ram(source) if cache else read_frame(source, encoding)
+        target_ram = cache.ram(target) if cache else read_frame(target, encoding)
         previous = frame_lookup[(source.episode, source.outcome)].get(source.number - 1)
         if previous is None:
             previous_ram = ram
             counts["padded_history"] += 1
         else:
             previous_ram = cache.ram(previous) if cache else read_frame(previous, encoding)
-        success = int(source.outcome == "win")
-        rows.append(extract_features(ram, previous_ram, success=success))
+        if label_offset == 0:
+            before, after = previous_ram, ram
+            progress_reference = progress_before
+            effect_frame = source.number
+        else:
+            before, after = ram, target_ram
+            progress_reference = progress_through_source
+            effect_frame = target.number
+        action_value = _action_value(
+            before,
+            after,
+            progress_reference,
+            effect_frame,
+            death_frames[(source.episode, source.outcome)],
+            pre_death_frames,
+        )
+        rows.append(extract_features(ram, previous_ram, action_value=action_value))
         labels.append(target.action)
         source_path = (
             source.path.as_posix()
@@ -227,6 +298,7 @@ def prepare(
         levels.append(f"{source.world}-{source.level}")
         frames_out.append(source.number)
         outcomes.append(source.outcome)
+        action_values.append(action_value)
     if not rows:
         raise ValueError(
             "No controllable samples survived. Check RAM encoding and selection."
@@ -247,12 +319,22 @@ def prepare(
         "priority_rows": sum(item[2] for item in selected),
         "selection": "action-balanced-trajectory-round-robin",
         "max_action_share": max_action_share,
+        "pre_death_frames": pre_death_frames,
+        "action_value_rule": {
+            "positive": "new_progress_or_score_gain_or_powerup_gain",
+            "neutral": "no_observed_transition_reward",
+            "negative": "within_pre_death_window",
+        },
         "candidate_action_counts": dict(sorted(candidate_action_counts.items())),
         "seed": seed,
         "eligible_pairs": eligible,
         "selected_rows": len(rows),
         "trajectory_count": len(set(episode_ids)),
         "outcome_counts": dict(sorted(Counter(outcomes).items())),
+        "action_value_counts": dict(sorted(Counter(action_values).items())),
+        "detected_death_trajectories": sum(
+            frame is not None for frame in death_frames.values()
+        ),
         "levels": sorted(set(levels)),
         "skipped": dict(counts),
         "action_counts": dict(sorted(selected_action_counts.items())),
@@ -270,6 +352,7 @@ def prepare(
             levels=np.asarray(levels),
             frames=np.asarray(frames_out),
             outcomes=np.asarray(outcomes),
+            action_values=np.asarray(action_values, dtype=np.int8),
             metadata=np.asarray(json.dumps(metadata)),
         )
     return metadata

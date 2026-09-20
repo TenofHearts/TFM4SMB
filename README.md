@@ -4,7 +4,7 @@ A RAM-based imitation policy using successful and failed trajectories cached by
 `data_selection.py`. The pipeline prepares a compact context table, fits an
 explicit TabPFN **v3.5** classifier, saves it, and predicts controller actions
 from live NES RAM. Each sample conditions on two consecutive frames and a desired
-success flag. The configured held-out level is explicitly excluded from the
+per-action value. The configured held-out level is explicitly excluded from the
 context and reserved for emulator testing.
 
 `train` performs TabPFN context fitting, **not gradient fine-tuning or reinforcement
@@ -113,8 +113,13 @@ be calibrated pixels per frame. Object types share slots with platforms and
 power-ups, so the feature names intentionally say “object.”
 
 The model input concatenates the preceding and current state vectors and appends
-`desired_success`, producing **409 inputs**. Training rows use `1` for winning
-episodes and `0` for failed episodes; live prediction deliberately requests `1`.
+`desired_action_value`, producing **409 inputs**. Each recorded action is labeled
+from its observed RAM transition: `1` for new maximum forward progress, a score
+increase, or a power-up gain; `0` when no measurable consequence is observed;
+and `-1` within the configured 30-frame window before a detected death. Death is
+detected from Mario's RAM state rather than inferred from a `fail` filename.
+Negative takes precedence over positive when both rules match. Live prediction
+deliberately requests `desired_action_value=1`.
 The first decision after reset duplicates the current state because no prior
 frame exists. Later rollout decisions use genuinely adjacent emulator states,
 including when `action_repeat` is greater than one.
@@ -196,7 +201,7 @@ from tfm4mario.policy import Policy
 
 policy = Policy(Path("artifacts/policy"), device="cuda")
 policy.reset_history()  # call at every episode boundary
-decision = policy.predict_ram(ram_bytes, success=1)  # exactly 2048 bytes
+decision = policy.predict_ram(ram_bytes, action_value=1)  # exactly 2048 bytes
 # Set decision["buttons"], advance ONE emulated frame, then read RAM again.
 ```
 
@@ -250,7 +255,7 @@ The configured live evaluation uses the actual 8-4 emulator. If you also want
 offline action metrics, create a separate metadata-cache directory containing
 only the 8-4 episode shards. Copy the config to `heldout.toml`, point
 `paths.selected_data` at that directory, set `paths.context` to
-`artifacts/heldout-v3.npz`, remove `prepare.exclude_level`, and set the outcome you
+`artifacts/heldout-v4.npz`, remove `prepare.exclude_level`, and set the outcome you
 want. Run preparation with that config, then evaluation with the original config:
 
 ```powershell

@@ -140,26 +140,26 @@ class FeatureTests(unittest.TestCase):
         np.testing.assert_array_equal(before, extract_features(ram))
         self.assertEqual(len(before), len(FEATURE_NAMES))
 
-    def test_two_frame_window_and_success_condition(self):
+    def test_two_frame_window_and_action_value_condition(self):
         previous = game_ram()
         current = game_ram()
         previous[0x86] = 9
         current[0x86] = 10
-        values = extract_features(current, previous, success=0)
+        values = extract_features(current, previous, action_value=-1)
         self.assertEqual(len(values), len(STATE_FEATURE_NAMES) * 2 + 1)
         self.assertEqual(values[FEATURE_NAMES.index("previous_player_subtile_x")], 9)
         self.assertEqual(values[FEATURE_NAMES.index("current_player_subtile_x")], 10)
-        self.assertEqual(values[FEATURE_NAMES.index("desired_success")], 0)
+        self.assertEqual(values[FEATURE_NAMES.index("desired_action_value")], -1)
         np.testing.assert_array_equal(
-            values, extract_features(bytes(current), bytes(previous), success=0)
+            values, extract_features(bytes(current), bytes(previous), action_value=-1)
         )
-        padded = extract_features(current, success=1)
+        padded = extract_features(current, action_value=1)
         np.testing.assert_array_equal(
             padded[:len(STATE_FEATURE_NAMES)],
             padded[len(STATE_FEATURE_NAMES):2 * len(STATE_FEATURE_NAMES)],
         )
-        with self.assertRaisesRegex(ValueError, "success"):
-            extract_features(current, success=2)
+        with self.assertRaisesRegex(ValueError, "action_value"):
+            extract_features(current, action_value=2)
 
     def test_invalid_ram_rejected(self):
         for value in [np.zeros(2047), np.zeros(2048), np.full(2048, 256), np.full(2048, -1)]:
@@ -279,18 +279,20 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(metadata["priority_rows"], 4)
             self.assertEqual(loaded["effective_head_rows_per_trajectory"], 2)
 
-    def test_failures_success_flag_and_action_cap_are_applied(self):
+    def test_per_action_values_and_action_cap_are_applied(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "data"
             data.mkdir()
-            specifications = [("win", 2, 20), ("fail", 1, 148)]
-            for outcome, embedded, dominant in specifications:
+            specifications = [("win", 2), ("fail", 1)]
+            for outcome, embedded in specifications:
                 for episode in range(2):
                     for number in range(1, 9):
                         ram = game_ram()
-                        ram[0x86] = number
-                        action = dominant if number <= 6 else (148 if dominant == 20 else 20)
+                        ram[0x86] = 2 if number >= 2 else 1
+                        if outcome == "fail" and number == 8:
+                            ram[0x0E] = 0x0B
+                        action = 20 if number % 2 == 0 else 148
                         path = data / (
                             f"p_s_e{episode}_1-1_f{number}_a{action}_date.{outcome}.png"
                         )
@@ -301,17 +303,21 @@ class DatasetTests(unittest.TestCase):
                 output,
                 outcome="all",
                 stride=1,
-                max_rows=12,
-                label_offset=0,
+                max_rows=28,
+                label_offset=1,
                 head_rows_per_trajectory=1,
-                max_action_share=0.5,
+                max_action_share=0.6,
+                pre_death_frames=2,
             )
             with np.load(output, allow_pickle=False) as table:
-                flags = table["X"][:, FEATURE_NAMES.index("desired_success")]
+                values = table["X"][:, FEATURE_NAMES.index("desired_action_value")]
                 outcomes = table["outcomes"].tolist()
+                stored_values = table["action_values"].tolist()
             self.assertEqual(set(outcomes), {"win", "fail"})
-            self.assertEqual(set(flags.tolist()), {0.0, 1.0})
-            self.assertLessEqual(max(metadata["action_counts"].values()), 6)
+            self.assertEqual(set(values.tolist()), {-1.0, 0.0, 1.0})
+            self.assertEqual(values.tolist(), stored_values)
+            self.assertLessEqual(max(metadata["action_counts"].values()), 16)
+            self.assertEqual(metadata["detected_death_trajectories"], 2)
             self.assertEqual(metadata["selection"], "action-balanced-trajectory-round-robin")
 
 

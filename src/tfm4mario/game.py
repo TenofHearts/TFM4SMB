@@ -167,7 +167,7 @@ def rollout(
         decision = policy.predict_ram(
             current_ram,
             previous_ram=previous_ram,
-            success=1,
+            action_value=1,
             selection=action_selection,
             rng=rng,
         )

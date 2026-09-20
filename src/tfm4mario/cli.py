@@ -59,6 +59,12 @@ def parser():
         help="Hard maximum fraction for any one action in the selected rows",
     )
     prep.add_argument(
+        "--pre-death-frames",
+        type=positive,
+        default=30,
+        help="Label this many frames immediately before detected death as -1",
+    )
+    prep.add_argument(
         "--ram-encoding", choices=["dataset-cr", "raw"], default="dataset-cr"
     )
     fit = sub.add_parser(
@@ -198,6 +204,7 @@ def main():
             exclude_level=args.exclude_level,
             head_rows_per_trajectory=args.head_rows_per_trajectory,
             max_action_share=args.max_action_share,
+            pre_death_frames=args.pre_death_frames,
         )
     elif args.command == "train":
         from .policy import train

@@ -108,11 +108,11 @@ class Policy:
         self._previous_ram = None
 
     def predict_ram(
-        self, ram, *, previous_ram=None, success=1, selection="argmax", rng=None
+        self, ram, *, previous_ram=None, action_value=1, selection="argmax", rng=None
     ):
         started = time.perf_counter()
         prior = self._previous_ram if previous_ram is None else previous_ram
-        features = extract_features(ram, prior, success=success)
+        features = extract_features(ram, prior, action_value=action_value)
         self._previous_ram = checked_ram(ram).astype(np.uint8)
         probabilities = self.model.predict_proba(features[None, :])[0]
         if selection == "argmax":
@@ -128,7 +128,7 @@ class Policy:
             "buttons": button_names(action),
             "confidence": float(probabilities[index]),
             "selection": selection,
-            "desired_success": int(success),
+            "desired_action_value": int(action_value),
             "predict_seconds": time.perf_counter() - started,
         }
 
