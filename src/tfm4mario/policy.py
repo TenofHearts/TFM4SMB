@@ -117,26 +117,53 @@ class Policy:
         return time.perf_counter() - started
 
     def predict_ram(
-        self, ram, *, previous_ram=None, action_value=1, selection="argmax", rng=None
+        self,
+        ram,
+        *,
+        previous_ram=None,
+        action_value=1,
+        selection="argmax",
+        epsilon=0.1,
+        confidence_threshold=0.5,
+        rng=None,
     ):
+        if not 0 <= epsilon <= 1 or not 0 <= confidence_threshold <= 1:
+            raise ValueError("epsilon/confidence_threshold must be in [0, 1]")
         started = time.perf_counter()
         prior = self._previous_ram if previous_ram is None else previous_ram
         features = extract_features(ram, prior, action_value=action_value)
         self._previous_ram = checked_ram(ram).astype(np.uint8)
         probabilities = self.model.predict_proba(features[None, :])[0]
+        greedy_index = int(np.argmax(probabilities))
+        max_confidence = float(probabilities[greedy_index])
+        explored = False
         if selection == "argmax":
-            index = int(np.argmax(probabilities))
+            index = greedy_index
         elif selection == "sample":
             rng = np.random.default_rng() if rng is None else rng
             index = int(rng.choice(len(probabilities), p=probabilities))
+        elif selection == "epsilon_greedy":
+            rng = np.random.default_rng() if rng is None else rng
+            explored = max_confidence < confidence_threshold and rng.random() < epsilon
+            index = (
+                int(rng.integers(len(probabilities))) if explored else greedy_index
+            )
         else:
-            raise ValueError("selection must be argmax or sample")
+            raise ValueError("selection must be argmax, sample, or epsilon_greedy")
         action = validate_action(int(self.model.classes_[index]))
         return {
             "action": action,
             "buttons": button_names(action),
             "confidence": float(probabilities[index]),
+            "max_confidence": max_confidence,
             "selection": selection,
+            "explored": explored,
+            "epsilon": float(epsilon) if selection == "epsilon_greedy" else None,
+            "confidence_threshold": (
+                float(confidence_threshold)
+                if selection == "epsilon_greedy"
+                else None
+            ),
             "desired_action_value": int(action_value),
             "predict_seconds": time.perf_counter() - started,
         }

@@ -3,12 +3,12 @@
 
 [paths]
 selected_data = "processed_data/metadata_cache" # Cached win/fail trajectories; preparation selects level 1-3 only.
-context = "artifacts/context-1-3-v4.npz"
-model = "artifacts/policy-1-3-v4"
+context = "artifacts/context-1-3-v4-stride2.npz"
+model = "artifacts/policy-1-3-v4-stride2"
 evaluation = "artifacts/heldout-v4.npz"
-rollout = "artifacts/rollout-1-3-42-v4" # Choose a new directory for each run.
-adaptive_rollout = "artifacts/adapt-1-3-42-v4" # One trace/video per adaptive episode.
-online_cache = "artifacts/online-replay-1-3-v4.npz" # Bounded persistent experience.
+rollout = "artifacts/rollout-1-3-42-v4-stride2" # Choose a new directory for each run.
+adaptive_rollout = "artifacts/adapt-1-3-42-v4-stride2" # One trace/video per adaptive episode.
+online_cache = "artifacts/online-replay-1-3-v4-stride2.npz" # Bounded persistent experience.
 
 [runtime]
 device = "auto" # "cpu", "cuda", or "auto"; check with: uv run tfm4mario doctor
@@ -16,10 +16,9 @@ seed = 42
 
 [prepare]
 outcome = "all" # Both outcomes provide per-action value examples.
-stride = 4
+stride = 2 # Keep every second teacher decision; temporal inputs still use adjacent frames.
 max_rows = 50000
 head_rows_per_trajectory = 16 # Prefer each trajectory's opening wait-to-move transition.
-max_action_share = 0.40 # Action-balanced trajectory sampling caps every action at 40%.
 pre_death_frames = 30 # Half a second at 60 FPS; detected pre-death actions receive -1.
 label_offset = 1 # RAM[f] is post-action state; predict the action for frame f+1.
 include_level = "1-3"
@@ -44,7 +43,9 @@ env_id = "SuperMarioBros-1-3-v0"
 episodes = 1
 max_frames = 18000
 action_repeat = 1 # Increasing this changes control behavior; start at one.
-action_selection = "sample" # Seeded sampling avoids argmax deadlocks in wait states.
+action_selection = "epsilon_greedy"
+epsilon = 0.10 # Explore only when maximum model confidence is below 0.50.
+confidence_threshold = 0.50
 render = false # true for a local display, false on a headless server.
 record_video = true # Write episode-000.mp4 without opening a display.
 video_fps = 60 # NES playback rate; model inference latency is not encoded.
@@ -54,7 +55,9 @@ env_id = "SuperMarioBros-1-3-v0"
 episodes = 5 # Policy is frozen within each episode and refit once between episodes.
 max_frames = 18000
 action_repeat = 1
-action_selection = "sample"
+action_selection = "epsilon_greedy"
+epsilon = 0.10 # Explore only when maximum model confidence is below 0.50.
+confidence_threshold = 0.50
 online_capacity = 256 # FIFO replay rows retained across episodes.
 pre_death_frames = 30
 render = false

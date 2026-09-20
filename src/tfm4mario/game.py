@@ -143,6 +143,8 @@ def rollout(
     action_repeat=1,
     seed=0,
     action_selection="sample",
+    epsilon=0.1,
+    confidence_threshold=0.5,
     trace=None,
     video=None,
     online=None,
@@ -156,6 +158,8 @@ def rollout(
     reward_total = 0.0
     frames = 0
     decisions = 0
+    low_confidence_decisions = 0
+    exploratory_decisions = 0
     latencies = []
     terminated = truncated = False
     flag_get = bool(info.get("flag_get", False))
@@ -174,10 +178,15 @@ def rollout(
             previous_ram=previous_ram,
             action_value=1,
             selection=action_selection,
+            epsilon=epsilon,
+            confidence_threshold=confidence_threshold,
             rng=rng,
         )
         latencies.append(decision["predict_seconds"])
         decisions += 1
+        if decision.get("max_confidence", 1.0) < confidence_threshold:
+            low_confidence_decisions += 1
+        exploratory_decisions += int(decision.get("explored", False))
         # Never add a silent frameskip: the context's targets are per-frame.
         for _ in range(min(action_repeat, max_frames - frames)):
             # Preserve the state immediately before the last emulated step.  At
@@ -228,6 +237,11 @@ def rollout(
     result = {
         "frames": frames,
         "decisions": decisions,
+        "low_confidence_decisions": low_confidence_decisions,
+        "exploratory_decisions": exploratory_decisions,
+        "exploration_rate": (
+            exploratory_decisions / decisions if decisions else 0.0
+        ),
         "reward": reward_total,
         "flag_get": flag_get,
         "terminated": terminated,
@@ -242,6 +256,10 @@ def rollout(
         "x_pos": info.get("x_pos"),
         "action_repeat": action_repeat,
         "action_selection": action_selection,
+        "epsilon": epsilon if action_selection == "epsilon_greedy" else None,
+        "confidence_threshold": (
+            confidence_threshold if action_selection == "epsilon_greedy" else None
+        ),
     }
     if online is not None:
         result["online_update"] = online_update
@@ -264,6 +282,8 @@ def play(
     seed=0,
     render=False,
     action_selection="sample",
+    epsilon=0.1,
+    confidence_threshold=0.5,
     record_video=False,
     video_fps=60,
     online=None,
@@ -290,6 +310,8 @@ def play(
                         action_repeat=action_repeat,
                         seed=seed + index,
                         action_selection=action_selection,
+                        epsilon=epsilon,
+                        confidence_threshold=confidence_threshold,
                         trace=trace,
                         video=recorder,
                         online=online,

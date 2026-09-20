@@ -22,6 +22,7 @@ from tfm4mario.features import (
 from tfm4mario.game import rollout
 from tfm4mario.metadata_cache import build_cache
 from tfm4mario.online import OnlineReplay
+from tfm4mario.policy import Policy as FittedPolicy
 from tfm4mario.ram import (
     PNG_SIGNATURE,
     OutcomeMismatchError,
@@ -99,7 +100,8 @@ class ConfigTests(unittest.TestCase):
     def test_typos_and_invalid_numbers_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.toml"
-            for content in ['[prepare]\nmax_rows=0', '[prepare]\nmax_action_share=1.1',
+            for content in ['[prepare]\nmax_rows=0',
+                            '[adapt]\nepsilon=1.1',
                             '[train]\nn_estimator=1',
                             '[play]\nrender="false"', '[prepare]\nlabel_offset=2']:
                 config.write_text(content)
@@ -275,7 +277,7 @@ class DatasetTests(unittest.TestCase):
                     exclude_level="8-4",
                 )
 
-    def test_opening_rows_are_preferred_during_balanced_selection(self):
+    def test_opening_rows_are_preferred_during_trajectory_selection(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "data"
@@ -299,7 +301,7 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(metadata["priority_rows"], 4)
             self.assertEqual(loaded["effective_head_rows_per_trajectory"], 2)
 
-    def test_balancing_can_reduce_a_small_level_context(self):
+    def test_trajectory_selection_respects_capacity_and_action_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "data"
@@ -309,20 +311,45 @@ class DatasetTests(unittest.TestCase):
                 action = 20 if number <= 7 else 148
                 path = data / f"p_s_e0_1-1_f{number}_a{action}_date.win.png"
                 path.write_bytes(png_bytes(ram, action))
+            output = root / "selected.npz"
             metadata = prepare(
                 data,
-                root / "balanced.npz",
+                output,
                 stride=1,
-                max_rows=100,
+                max_rows=6,
                 label_offset=0,
                 include_level="1-1",
-                max_action_share=0.5,
             )
             self.assertEqual(metadata["selected_rows"], 6)
-            self.assertEqual(metadata["action_counts"], {20: 3, 148: 3})
-            self.assertEqual(metadata["balance_discarded_rows"], 4)
+            self.assertEqual(metadata["selection_discarded_rows"], 4)
+            with np.load(output, allow_pickle=False) as table:
+                self.assertIn(8, set(map(int, table["frames"])))
 
-    def test_per_action_values_and_action_cap_are_applied(self):
+    def test_stride_never_drops_action_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            for number in range(1, 9):
+                ram = game_ram()
+                action = 148 if number == 3 else 20
+                path = data / f"p_s_e0_1-1_f{number}_a{action}_date.win.png"
+                path.write_bytes(png_bytes(ram, action))
+            output = root / "context.npz"
+            metadata = prepare(
+                data,
+                output,
+                stride=4,
+                max_rows=20,
+                label_offset=0,
+            )
+            with np.load(output, allow_pickle=False) as table:
+                selected_frames = set(map(int, table["frames"]))
+            self.assertIn(3, selected_frames)
+            self.assertIn(4, selected_frames)
+            self.assertEqual(metadata["mandatory_action_change_rows"], 2)
+
+    def test_per_action_values_are_applied(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             data = root / "data"
@@ -340,7 +367,7 @@ class DatasetTests(unittest.TestCase):
                             f"p_s_e{episode}_1-1_f{number}_a{action}_date.{outcome}.png"
                         )
                         path.write_bytes(png_bytes(ram, action, outcome=embedded))
-            output = root / "balanced.npz"
+            output = root / "values.npz"
             metadata = prepare(
                 data,
                 output,
@@ -349,7 +376,6 @@ class DatasetTests(unittest.TestCase):
                 max_rows=28,
                 label_offset=1,
                 head_rows_per_trajectory=1,
-                max_action_share=0.6,
                 pre_death_frames=2,
             )
             with np.load(output, allow_pickle=False) as table:
@@ -359,12 +385,48 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(set(outcomes), {"win", "fail"})
             self.assertEqual(set(values.tolist()), {-1.0, 0.0, 1.0})
             self.assertEqual(values.tolist(), stored_values)
-            self.assertLessEqual(max(metadata["action_counts"].values()), 16)
             self.assertEqual(metadata["detected_death_trajectories"], 2)
-            self.assertEqual(metadata["selection"], "action-balanced-trajectory-round-robin")
+            self.assertEqual(
+                metadata["selection"],
+                "mandatory-changes-trajectory-round-robin",
+            )
 
 
 class ActionAndRolloutTests(unittest.TestCase):
+    def test_confidence_gated_epsilon_greedy(self):
+        class Model:
+            classes_ = np.asarray([0, 20, 148])
+
+            def __init__(self, probabilities):
+                self.probabilities = np.asarray([probabilities])
+
+            def predict_proba(self, X):
+                return self.probabilities
+
+        policy = FittedPolicy.__new__(FittedPolicy)
+        policy._previous_ram = None
+        policy.model = Model([0.40, 0.35, 0.25])
+        explored = policy.predict_ram(
+            game_ram(),
+            selection="epsilon_greedy",
+            epsilon=1.0,
+            confidence_threshold=0.5,
+            rng=np.random.default_rng(3),
+        )
+        self.assertTrue(explored["explored"])
+        self.assertEqual(explored["max_confidence"], 0.4)
+
+        policy.model = Model([0.60, 0.25, 0.15])
+        greedy = policy.predict_ram(
+            game_ram(),
+            selection="epsilon_greedy",
+            epsilon=1.0,
+            confidence_threshold=0.5,
+            rng=np.random.default_rng(3),
+        )
+        self.assertFalse(greedy["explored"])
+        self.assertEqual(greedy["action"], 0)
+
     def test_action_translation(self):
         self.assertEqual(button_names(148), ["A", "B", "right"])
         self.assertEqual(to_nes_action(148), 131)

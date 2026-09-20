@@ -81,16 +81,18 @@ directory.
 Inputs are read-only and existing context artifacts are never overwritten.
 
 Preparation selects both winning and failed trajectories by default and sorts
-frame numbers numerically within each episode. Candidate rows are stratified by
-target action and drawn round-robin across trajectory IDs. `max_action_share`
-places a hard ceiling on the selected fraction of any single action; preparation
-uses the largest feasible row count at or below `max_rows`, discarding excess
-modal-action rows when the complete candidate set cannot satisfy the cap.
-Opening candidates are preferred within each trajectory. Non-controllable states
-are removed before selection.
-`--stride 4` reduces context redundancy; it does **not** cause
+frame numbers numerically within each episode. When `max_rows` is binding,
+ordinary rows are drawn round-robin across trajectory IDs, with opening rows
+preferred. There is no per-action class cap. Non-controllable states are removed
+before selection.
+`--stride 2` keeps every second teacher decision while reducing adjacent-row
+redundancy; it does **not** cause
 the live emulator to skip frames. Inspect the returned action counts, especially
 for rare jump/climb/pipe combinations, before scaling up.
+Any target action that differs from the immediately preceding recorded action
+bypasses stride filtering and is mandatory during final selection. Preparation
+fails rather than silently removing mandatory changes if they alone exceed
+`max_rows`.
 
 The context `.npz` includes `X`, `y`, named feature metadata, episode/level IDs, source and
 target paths, and frame numbers. IDs and paths are provenance,
@@ -282,6 +284,13 @@ learned value function, policy-gradient objective, or explicit exploration
 bonus. CPU refits may pause for a substantial time between episodes. Compare the
 per-episode metrics rather than treating one stochastic run as proof of
 improvement.
+
+The configured `play` and `adapt` modes use confidence-gated epsilon-greedy
+selection. The greedy action is used whenever maximum class probability is at
+least `0.50`. Below that threshold, the policy chooses a uniformly random known
+action with probability `0.10` and otherwise uses the greedy action. Traces and
+summaries report low-confidence and exploratory decision counts. This explores
+only actions already present in the fitted model's class set.
 
 ## Optional evaluation and checks
 

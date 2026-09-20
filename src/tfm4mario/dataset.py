@@ -54,98 +54,48 @@ def _action_value(before, after, progress_max, effect_frame, death_frame, window
     return int(useful_progress or score_gain or powerup_gain)
 
 
-def _balanced_quotas(availability, total, max_action_share):
-    """Allocate a proportional row budget with a hard per-action ceiling."""
-    ceiling = int(np.floor(total * max_action_share))
-    if ceiling < 1:
-        raise ValueError("max_action_share is too small for the requested context")
-    if sum(min(count, ceiling) for count in availability.values()) < total:
-        dominant, count = max(availability.items(), key=lambda item: item[1])
-        raise ValueError(
-            f"Cannot select {total} rows with max_action_share={max_action_share}: "
-            f"action {dominant} has {count} candidates and the other actions do "
-            "not provide enough rows. Increase the share or reduce max_rows."
-        )
-    quotas = {action: 0 for action in availability}
-    remaining = total
-    active = set(availability)
-    while remaining:
-        weights = {action: availability[action] - quotas[action] for action in active}
-        weight_total = sum(weights.values())
-        if not weight_total:
-            raise ValueError("Action-balanced selection exhausted its candidates")
-        progress = False
-        for action in sorted(active):
-            room = min(availability[action], ceiling) - quotas[action]
-            if room <= 0:
-                continue
-            grant = min(room, max(1, int(round(remaining * weights[action] / weight_total))))
-            grant = min(grant, remaining)
-            quotas[action] += grant
-            remaining -= grant
-            progress = True
-            if not remaining:
-                break
-        active = {
-            action
-            for action in active
-            if quotas[action] < min(availability[action], ceiling)
-        }
-        if not progress:
-            raise ValueError("Action-balanced selection could not satisfy its cap")
-    return quotas
-
-
-def _largest_balanced_total(availability, requested, max_action_share):
-    """Use the largest available context for which the hard cap is feasible."""
-    for total in range(requested, 0, -1):
-        ceiling = int(np.floor(total * max_action_share))
-        if ceiling >= 1 and sum(
-            min(count, ceiling) for count in availability.values()
-        ) >= total:
-            return total
-    raise ValueError(
-        f"No nonempty selection can satisfy max_action_share={max_action_share} "
-        f"for action availability {dict(sorted(availability.items()))}"
-    )
-
-
-def _select_trajectory_rows(candidates, max_rows, max_action_share, rng):
-    """Action-stratified sampling, round-robin across trajectory IDs."""
+def _select_trajectory_rows(candidates, max_rows, rng):
+    """Keep action changes, then sample round-robin across trajectory IDs."""
     availability = Counter(
         item[1].action
         for episode_candidates in candidates.values()
         for item in episode_candidates
     )
-    requested = min(max_rows, sum(availability.values()))
-    total = _largest_balanced_total(availability, requested, max_action_share)
-    quotas = _balanced_quotas(availability, total, max_action_share)
-    selected = []
-    for action, quota in sorted(quotas.items()):
-        queues = {}
-        for episode, episode_candidates in candidates.items():
-            matches = [item for item in episode_candidates if item[1].action == action]
-            if matches:
-                # Keep opening transitions first, but randomize later rows.
-                head = [item for item in matches if item[2]]
-                tail = [item for item in matches if not item[2]]
-                rng.shuffle(tail)
-                queues[episode] = head + tail
-        episode_order = sorted(queues)
-        rng.shuffle(episode_order)
-        while quota:
-            progressed = False
-            for episode in episode_order:
-                if queues[episode]:
-                    selected.append(queues[episode].pop(0))
-                    quota -= 1
-                    progressed = True
-                    if not quota:
-                        break
-            if not progressed:
-                raise ValueError(f"Insufficient candidates for action {action}")
+    mandatory = [
+        item
+        for episode_candidates in candidates.values()
+        for item in episode_candidates
+        if item[3]
+    ]
+    if len(mandatory) > max_rows:
+        raise ValueError(
+            f"{len(mandatory)} mandatory action-change rows exceed max_rows={max_rows}"
+        )
+    selected = list(mandatory)
+    queues = {}
+    for episode, episode_candidates in candidates.items():
+        ordinary = [item for item in episode_candidates if not item[3]]
+        head = [item for item in ordinary if item[2]]
+        tail = [item for item in ordinary if not item[2]]
+        rng.shuffle(tail)
+        queues[episode] = head + tail
+    episode_order = sorted(queues)
+    rng.shuffle(episode_order)
+    remaining = min(max_rows, sum(availability.values())) - len(selected)
+    while remaining:
+        progressed = False
+        for episode in episode_order:
+            if queues[episode]:
+                selected.append(queues[episode].pop(0))
+                remaining -= 1
+                progressed = True
+                if not remaining:
+                    break
+        if not progressed:
+            raise ValueError("Trajectory selection exhausted its candidates")
     rng.shuffle(selected)
-    return selected, availability, quotas
+    selected_counts = Counter(item[1].action for item in selected)
+    return selected, availability, selected_counts
 
 
 def discover(
@@ -177,7 +127,7 @@ def prepare(
     output: Path,
     *,
     outcome="all",
-    stride=4,
+    stride=2,
     max_rows=8192,
     seed=0,
     label_offset=1,
@@ -185,7 +135,6 @@ def prepare(
     include_level=None,
     exclude_level=None,
     head_rows_per_trajectory=16,
-    max_action_share=0.50,
     pre_death_frames=30,
 ):
     if output.exists():
@@ -195,13 +144,11 @@ def prepare(
         or max_rows < 1
         or head_rows_per_trajectory < 0
         or label_offset not in (0, 1)
-        or not 0 < max_action_share <= 1
         or pre_death_frames < 1
     ):
         raise ValueError(
             "stride/max_rows must be positive; head rows must be nonnegative; "
-            "label_offset must be 0 or 1; max_action_share must be in (0, 1]; "
-            "pre_death_frames must be positive"
+            "label_offset must be 0 or 1; pre_death_frames must be positive"
         )
     if include_level is not None and exclude_level is not None:
         raise ValueError("include_level and exclude_level are mutually exclusive")
@@ -234,10 +181,18 @@ def prepare(
         episode_head = 0
         episode_candidates = []
         progress_max = -1
-        for source in frames[::stride]:
+        for frame_index, source in enumerate(frames):
             target = by_number.get(source.number + label_offset)
             if target is None:
                 counts["missing_target_frame"] += 1
+                continue
+            previous_target = by_number.get(target.number - 1)
+            is_action_change = (
+                previous_target is not None
+                and target.action != previous_target.action
+            )
+            if frame_index % stride != 0 and not is_action_change:
+                counts["stride_dropped"] += 1
                 continue
             try:
                 validate_action(target.action)
@@ -256,13 +211,20 @@ def prepare(
             # for every candidate would scale to multiple gigabytes on the full
             # cache even though only max_rows samples can reach the output.
             episode_candidates.append(
-                (source, target, is_head, progress_before, progress_max)
+                (
+                    source,
+                    target,
+                    is_head,
+                    is_action_change,
+                    progress_before,
+                    progress_max,
+                )
             )
             episode_head += 1
         if episode_candidates:
             candidates[episode_key] = episode_candidates
     selected, candidate_action_counts, selected_action_counts = _select_trajectory_rows(
-        candidates, max_rows, max_action_share, rng
+        candidates, max_rows, rng
     )
     selected.sort(key=lambda item: (item[0].episode, item[0].number))
     rows, labels, source_paths, target_paths, episode_ids, levels, frames_out = (
@@ -276,7 +238,14 @@ def prepare(
     )
     outcomes = []
     action_values = []
-    for source, target, _, progress_before, progress_through_source in selected:
+    for (
+        source,
+        target,
+        _,
+        _,
+        progress_before,
+        progress_through_source,
+    ) in selected:
         ram = cache.ram(source) if cache else read_frame(source, encoding)
         target_ram = cache.ram(target) if cache else read_frame(target, encoding)
         previous = frame_lookup[(source.episode, source.outcome)].get(source.number - 1)
@@ -339,8 +308,8 @@ def prepare(
         "head_rows_per_trajectory": head_rows_per_trajectory,
         "effective_head_rows_per_trajectory": effective_head,
         "priority_rows": sum(item[2] for item in selected),
-        "selection": "action-balanced-trajectory-round-robin",
-        "max_action_share": max_action_share,
+        "mandatory_action_change_rows": sum(item[3] for item in selected),
+        "selection": "mandatory-changes-trajectory-round-robin",
         "pre_death_frames": pre_death_frames,
         "action_value_rule": {
             "positive": "new_progress_or_score_gain_or_powerup_gain",
@@ -351,7 +320,7 @@ def prepare(
         "seed": seed,
         "eligible_pairs": eligible,
         "selected_rows": len(rows),
-        "balance_discarded_rows": eligible - len(rows),
+        "selection_discarded_rows": eligible - len(rows),
         "trajectory_count": len(set(episode_ids)),
         "outcome_counts": dict(sorted(Counter(outcomes).items())),
         "action_value_counts": dict(sorted(Counter(action_values).items())),

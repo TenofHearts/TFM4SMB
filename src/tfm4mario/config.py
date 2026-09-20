@@ -74,7 +74,9 @@ def apply_config(parser, commands, path: Path):
                     if not value.is_absolute():
                         value = path.resolve().parent / value
                 elif action.type is not None:
-                    if action.type is float or action.type.__name__ == "fraction":
+                    if action.type is float or action.type.__name__ in {
+                        "probability",
+                    }:
                         if not isinstance(value, (int, float)) or isinstance(value, bool):
                             raise ValueError("must be a TOML number")
                     elif not isinstance(value, int) or isinstance(value, bool):

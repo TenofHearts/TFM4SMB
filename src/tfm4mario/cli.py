@@ -16,10 +16,10 @@ def positive(value):
     return value
 
 
-def fraction(value):
+def probability(value):
     value = float(value)
-    if not 0 < value <= 1:
-        raise argparse.ArgumentTypeError("must be greater than 0 and at most 1")
+    if not 0 <= value <= 1:
+        raise argparse.ArgumentTypeError("must be between 0 and 1")
     return value
 
 
@@ -33,7 +33,7 @@ def parser():
     prep.add_argument("--data", type=Path)
     prep.add_argument("--output", type=Path)
     prep.add_argument("--outcome", choices=["win", "fail", "all"], default="all")
-    prep.add_argument("--stride", type=positive, default=4)
+    prep.add_argument("--stride", type=positive, default=2)
     prep.add_argument("--max-rows", type=positive, default=8192)
     prep.add_argument("--seed", type=int, default=0)
     prep.add_argument(
@@ -55,12 +55,6 @@ def parser():
         type=int,
         default=16,
         help="Prefer this many opening candidates per trajectory during selection",
-    )
-    prep.add_argument(
-        "--max-action-share",
-        type=fraction,
-        default=0.5,
-        help="Hard maximum fraction for any one action in the selected rows",
     )
     prep.add_argument(
         "--pre-death-frames",
@@ -114,7 +108,13 @@ def parser():
         command.add_argument("--max-frames", type=positive, default=18000)
         command.add_argument("--action-repeat", type=positive, default=1)
         command.add_argument(
-            "--action-selection", choices=["sample", "argmax"], default="sample"
+            "--action-selection",
+            choices=["sample", "argmax", "epsilon_greedy"],
+            default="sample",
+        )
+        command.add_argument("--epsilon", type=probability, default=0.1)
+        command.add_argument(
+            "--confidence-threshold", type=probability, default=0.5
         )
         command.add_argument("--seed", type=int, default=0)
         command.add_argument(
@@ -223,7 +223,6 @@ def main():
             include_level=args.include_level,
             exclude_level=args.exclude_level,
             head_rows_per_trajectory=args.head_rows_per_trajectory,
-            max_action_share=args.max_action_share,
             pre_death_frames=args.pre_death_frames,
         )
     elif args.command == "train":
@@ -278,6 +277,8 @@ def main():
                 seed=args.seed,
                 render=args.render,
                 action_selection=args.action_selection,
+                epsilon=args.epsilon,
+                confidence_threshold=args.confidence_threshold,
                 record_video=args.record_video,
                 video_fps=args.video_fps,
                 online=online,
