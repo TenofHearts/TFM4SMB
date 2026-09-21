@@ -23,6 +23,15 @@ def probability(value):
     return value
 
 
+def gameplay_action(value):
+    from .actions import validate_action
+
+    try:
+        return validate_action(int(value))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from error
+
+
 def parser():
     p = argparse.ArgumentParser(description="TabPFN 3.5 Mario RAM imitation pipeline")
     p.add_argument("--config", type=Path, default=Path("config.toml"))
@@ -33,7 +42,7 @@ def parser():
     prep.add_argument("--data", type=Path)
     prep.add_argument("--output", type=Path)
     prep.add_argument("--outcome", choices=["win", "fail", "all"], default="all")
-    prep.add_argument("--stride", type=positive, default=2)
+    prep.add_argument("--stride", type=positive, default=1)
     prep.add_argument("--max-rows", type=positive, default=8192)
     prep.add_argument("--seed", type=int, default=0)
     prep.add_argument(
@@ -99,6 +108,14 @@ def parser():
     inputs.add_argument("--ram", type=Path)
     predict.add_argument(
         "--ram-encoding", choices=["dataset-cr", "raw"], default="dataset-cr"
+    )
+    predict.add_argument(
+        "--previous-action",
+        type=gameplay_action,
+        help=(
+            "Action applied immediately before this RAM state; inferred from a "
+            "dataset PNG and otherwise defaults to no-op"
+        ),
     )
     predict.add_argument("--device", default="auto")
     ev = sub.add_parser(
@@ -259,12 +276,18 @@ def main():
         if args.command == "predict":
             from .ram import parse_frame, read_frame
 
-            ram = (
-                read_frame(parse_frame(args.png), args.ram_encoding)
-                if args.png
-                else np.frombuffer(args.ram.read_bytes(), dtype=np.uint8)
-            )
-            result = policy.predict_ram(ram)
+            if args.png:
+                frame = parse_frame(args.png)
+                ram = read_frame(frame, args.ram_encoding)
+                previous_action = (
+                    frame.action
+                    if args.previous_action is None
+                    else args.previous_action
+                )
+            else:
+                ram = np.frombuffer(args.ram.read_bytes(), dtype=np.uint8)
+                previous_action = args.previous_action or 0
+            result = policy.predict_ram(ram, previous_action=previous_action)
         elif args.command == "evaluate":
             result = evaluate(policy, args.data, args.batch_size)
         else:

@@ -13,6 +13,7 @@ import numpy as np
 from tfm4mario.actions import button_names, to_nes_action, validate_action
 from tfm4mario.dataset import load_table, prepare
 from tfm4mario.features import (
+    ACTION_FEATURE_NAMES,
     FEATURE_NAMES,
     STATE_FEATURE_NAMES,
     extract_features,
@@ -103,6 +104,7 @@ class ConfigTests(unittest.TestCase):
             for content in ['[prepare]\nmax_rows=0',
                             '[adapt]\nepsilon=1.1',
                             '[adapt]\nonline_min_progress_delta=0',
+                            '[predict]\nprevious_action=1',
                             '[train]\nn_estimator=1',
                             '[play]\nrender="false"', '[prepare]\nlabel_offset=2']:
                 config.write_text(content)
@@ -149,13 +151,28 @@ class FeatureTests(unittest.TestCase):
         current = game_ram()
         previous[0x86] = 9
         current[0x86] = 10
-        values = extract_features(current, previous, action_value=-1)
-        self.assertEqual(len(values), len(STATE_FEATURE_NAMES) * 2 + 1)
+        values = extract_features(
+            current, previous, previous_action=148, action_value=-1
+        )
+        self.assertEqual(
+            len(values),
+            len(STATE_FEATURE_NAMES) * 2 + len(ACTION_FEATURE_NAMES) + 1,
+        )
         self.assertEqual(values[FEATURE_NAMES.index("previous_player_subtile_x")], 9)
         self.assertEqual(values[FEATURE_NAMES.index("current_player_subtile_x")], 10)
         self.assertEqual(values[FEATURE_NAMES.index("desired_action_value")], -1)
+        self.assertEqual(values[FEATURE_NAMES.index("previous_action_A")], 1)
+        self.assertEqual(values[FEATURE_NAMES.index("previous_action_B")], 1)
+        self.assertEqual(values[FEATURE_NAMES.index("previous_action_right")], 1)
+        self.assertEqual(values[FEATURE_NAMES.index("previous_action_left")], 0)
         np.testing.assert_array_equal(
-            values, extract_features(bytes(current), bytes(previous), action_value=-1)
+            values,
+            extract_features(
+                bytes(current),
+                bytes(previous),
+                previous_action=148,
+                action_value=-1,
+            ),
         )
         padded = extract_features(current, action_value=1)
         np.testing.assert_array_equal(
@@ -164,6 +181,8 @@ class FeatureTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "action_value"):
             extract_features(current, action_value=2)
+        with self.assertRaisesRegex(ValueError, "START/SELECT"):
+            extract_features(current, previous_action=1)
 
     def test_invalid_ram_rejected(self):
         for value in [np.zeros(2047), np.zeros(2048), np.full(2048, 256), np.full(2048, -1)]:
@@ -224,6 +243,18 @@ class DatasetTests(unittest.TestCase):
                 X[:, FEATURE_NAMES.index("previous_player_subtile_x")],
                 [9, 9, 9, 9],
             )
+            np.testing.assert_array_equal(
+                X[:, FEATURE_NAMES.index("previous_action_B")],
+                [0, 1, 0, 1],
+            )
+            np.testing.assert_array_equal(
+                X[:, FEATURE_NAMES.index("previous_action_right")],
+                [0, 1, 0, 1],
+            )
+            with np.load(output, allow_pickle=False) as table:
+                np.testing.assert_array_equal(
+                    table["previous_actions"], [0, 20, 0, 20]
+                )
             self.assertEqual(meta["trajectory_count"], 2)
             self.assertEqual(meta["skipped"]["missing_target_frame"], 4)
             self.assertEqual(meta["priority_rows"], 4)
@@ -429,6 +460,7 @@ class ActionAndRolloutTests(unittest.TestCase):
                 self.probabilities = np.asarray([probabilities])
 
             def predict_proba(self, X):
+                self.last_X = X.copy()
                 return self.probabilities
 
         policy = FittedPolicy.__new__(FittedPolicy)
@@ -446,12 +478,31 @@ class ActionAndRolloutTests(unittest.TestCase):
         policy.model = Model([0.0, 1.0, 0.0])
         sampled = policy.predict_ram(
             game_ram(),
+            previous_action=148,
             selection="epsilon_sample",
             epsilon=0.0,
             rng=np.random.default_rng(3),
         )
         self.assertFalse(sampled["explored"])
         self.assertEqual(sampled["action"], 20)
+        self.assertEqual(sampled["previous_action"], 148)
+        self.assertEqual(
+            policy.model.last_X[0, FEATURE_NAMES.index("previous_action_A")], 1
+        )
+        self.assertEqual(
+            policy.model.last_X[0, FEATURE_NAMES.index("previous_action_B")], 1
+        )
+        self.assertEqual(
+            policy.model.last_X[0, FEATURE_NAMES.index("previous_action_right")], 1
+        )
+
+        policy.predict_ram(game_ram(), selection="argmax")
+        self.assertEqual(
+            policy.model.last_X[0, FEATURE_NAMES.index("previous_action_B")], 1
+        )
+        self.assertEqual(
+            policy.model.last_X[0, FEATURE_NAMES.index("previous_action_right")], 1
+        )
 
     def test_action_translation(self):
         self.assertEqual(button_names(148), ["A", "B", "right"])
@@ -479,12 +530,14 @@ class ActionAndRolloutTests(unittest.TestCase):
         class Policy:
             def __init__(self):
                 self.previous = []
+                self.previous_actions = []
 
             def reset_history(self):
                 self.previous.append("reset")
 
             def predict_ram(self, ram, **kwargs):
                 self.previous.append(kwargs["previous_ram"])
+                self.previous_actions.append(kwargs["previous_action"])
                 return {"action": 148, "predict_seconds": .01, "buttons": ["A", "B", "right"]}
 
         env = Env()
@@ -497,6 +550,7 @@ class ActionAndRolloutTests(unittest.TestCase):
         self.assertTrue(result["flag_get"])
         self.assertEqual(json.loads(trace.getvalue())["action"], 148)
         self.assertEqual(policy.previous, ["reset", None])
+        self.assertEqual(policy.previous_actions, [0])
 
     def test_video_receives_initial_and_stepped_frames(self):
         class Env:
@@ -565,11 +619,19 @@ class OnlineReplayTests(unittest.TestCase):
             replay.begin_episode(initial)
             current = initial.copy()
             flushed = None
+            previous_action = 0
             for index, action in enumerate((0, 16, 20), 1):
                 after = current.copy()
                 after[0x86] = index
-                flushed = replay.observe(current, current, action, after)
+                flushed = replay.observe(
+                    current,
+                    current,
+                    action,
+                    after,
+                    previous_action=previous_action,
+                )
                 current = after
+                previous_action = action
 
             self.assertEqual(flushed["rows"], 3)
             self.assertEqual(flushed["assigned_action_value"], 1)
@@ -578,6 +640,10 @@ class OnlineReplayTests(unittest.TestCase):
             self.assertEqual(policy.refits, [])
             with np.load(cache, allow_pickle=False) as saved:
                 np.testing.assert_array_equal(saved["action_values"], [1, 1, 1])
+                np.testing.assert_array_equal(
+                    saved["X"][:, FEATURE_NAMES.index("previous_action_B")],
+                    [0, 0, 1],
+                )
                 metadata = json.loads(str(saved["metadata"]))
                 self.assertEqual(metadata["min_progress_delta"], 3)
 

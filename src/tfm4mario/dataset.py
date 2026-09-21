@@ -139,7 +139,7 @@ def prepare(
     output: Path,
     *,
     outcome="all",
-    stride=2,
+    stride=1,
     max_rows=8192,
     seed=0,
     label_offset=1,
@@ -210,6 +210,7 @@ def prepare(
                 counts["stride_dropped"] += 1
                 continue
             try:
+                validate_action(source.action)
                 validate_action(target.action)
             except ValueError:
                 counts["non_gameplay_action"] += 1
@@ -286,7 +287,14 @@ def prepare(
             pre_death_frames,
             min_progress_delta,
         )
-        rows.append(extract_features(ram, previous_ram, action_value=action_value))
+        rows.append(
+            extract_features(
+                ram,
+                previous_ram,
+                previous_action=source.action,
+                action_value=action_value,
+            )
+        )
         labels.append(target.action)
         source_path = (
             source.path.as_posix()
@@ -365,6 +373,9 @@ def prepare(
             frames=np.asarray(frames_out),
             outcomes=np.asarray(outcomes),
             action_values=np.asarray(action_values, dtype=np.int8),
+            previous_actions=np.asarray(
+                [source.action for source, *_ in selected], dtype=np.uint8
+            ),
             metadata=np.asarray(json.dumps(metadata)),
         )
     return metadata

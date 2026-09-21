@@ -102,10 +102,12 @@ class Policy:
 
         self.model = load_fitted_tabpfn_model(fitted, device=device)
         self._previous_ram = None
+        self._previous_action = 0
 
     def reset_history(self):
         """Forget temporal context at an episode boundary."""
         self._previous_ram = None
+        self._previous_action = 0
 
     def refit_context(self, X, y):
         """Replace the in-memory TabPFN context; the saved model is unchanged."""
@@ -121,6 +123,7 @@ class Policy:
         ram,
         *,
         previous_ram=None,
+        previous_action=None,
         action_value=1,
         selection="argmax",
         epsilon=0.3,
@@ -130,7 +133,17 @@ class Policy:
             raise ValueError("epsilon must be in [0, 1]")
         started = time.perf_counter()
         prior = self._previous_ram if previous_ram is None else previous_ram
-        features = extract_features(ram, prior, action_value=action_value)
+        prior_action = (
+            getattr(self, "_previous_action", 0)
+            if previous_action is None
+            else validate_action(previous_action)
+        )
+        features = extract_features(
+            ram,
+            prior,
+            previous_action=prior_action,
+            action_value=action_value,
+        )
         self._previous_ram = checked_ram(ram).astype(np.uint8)
         probabilities = self.model.predict_proba(features[None, :])[0]
         greedy_index = int(np.argmax(probabilities))
@@ -152,6 +165,7 @@ class Policy:
         else:
             raise ValueError("selection must be argmax, sample, or epsilon_sample")
         action = validate_action(int(self.model.classes_[index]))
+        self._previous_action = action
         return {
             "action": action,
             "buttons": button_names(action),
@@ -161,6 +175,7 @@ class Policy:
             "explored": explored,
             "epsilon": float(epsilon) if selection == "epsilon_sample" else None,
             "desired_action_value": int(action_value),
+            "previous_action": int(prior_action),
             "predict_seconds": time.perf_counter() - started,
         }
 

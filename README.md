@@ -118,12 +118,15 @@ types need different behavior. Speeds are signed register values, not claimed to
 be calibrated pixels per frame. Object types share slots with platforms and
 power-ups, so the feature names intentionally say “object.”
 
-The model input concatenates the preceding and current state vectors and appends
-`desired_action_value`, producing **409 inputs**. Each recorded action is labeled
+The model input concatenates the preceding and current state vectors, six bits
+for the action applied to the current state (`A`, directions, and `B`), and
+`desired_action_value`, producing **415 inputs**. Teacher preparation gets those
+bits from action `f` while labeling action `f+1`; live control supplies the last
+action actually applied. Each recorded action is labeled
 from its observed RAM transition: `1` when it moves forward by at least the
 configured `min_progress_delta` in one frame **and** reaches a new trajectory
 progress maximum, or when it produces a score or power-up gain; `0` when no
-measurable consequence is observed; and `-1` within the configured 30-frame
+measurable consequence is observed; and `-1` within the configured pre-death
 window before a detected death. The supplied 3-pixel threshold selects fast
 forward movement rather than rewarding every 1-pixel crawl. Death is
 detected from Mario's RAM state rather than inferred from a `fail` filename.
@@ -134,11 +137,12 @@ frame exists. Later rollout decisions use genuinely adjacent emulator states,
 including when `action_repeat` is greater than one.
 
 The state extractor excludes controller registers, score, frame counter,
-level/world IDs, and absolute level progress. The two semantic timers are retained:
-without them, the visually identical opening wait states alias “wait” and “move.”
-It currently does not add controller history, fireball-specific slots, or an
-exhaustive terrain physics model. Feature schema
-version and ordered names are checked when loading a policy or evaluation table.
+level/world IDs, and absolute level progress. Previous action bits are explicit
+policy inputs rather than emulator-memory controller registers. The two semantic
+timers are retained: without them, the visually identical opening wait states
+alias “wait” and “move.” It currently does not add fireball-specific slots or an
+exhaustive terrain physics model. Feature schema version and ordered names are
+checked when loading a policy or evaluation table.
 
 ### Dataset repairs and action timing
 
@@ -199,8 +203,10 @@ uv run tfm4mario predict
 
 Set `predict.ram` to your RAM file, or replace it with `predict.png` for a dataset
 frame. `ram.bin` must contain the actual 2048 raw RAM bytes; no text/hex or newline repair
-is applied to emulator dumps. Prediction reports dataset action, button names,
-model confidence (not a success probability), and latency.
+is applied to emulator dumps. A dataset PNG supplies its recorded previous action
+automatically. For a standalone RAM dump, pass `--previous-action` when the prior
+input was not no-op. Prediction reports dataset action, button names, model
+confidence (not a success probability), and latency.
 
 For another emulator, read its RAM and use the same API directly:
 
@@ -210,7 +216,7 @@ from tfm4mario.policy import Policy
 
 policy = Policy(Path("artifacts/policy"), device="cuda")
 policy.reset_history()  # call at every episode boundary
-decision = policy.predict_ram(ram_bytes, action_value=1)  # exactly 2048 bytes
+decision = policy.predict_ram(ram_bytes, action_value=1)  # tracks its last action
 # Set decision["buttons"], advance ONE emulated frame, then read RAM again.
 ```
 
@@ -229,7 +235,7 @@ decision = policy.predict_ram(ram_bytes, action_value=1)  # exactly 2048 bytes
    The pinned major versions use Gymnasium. Do not mix old Gym/nes-py 8.x
    installation recipes into this environment. If native emulator installation
    fails on your machine, use a Linux server/WSL and send the build error.
-3. Confirm `doctor` reports `ram_bytes: 2048`, `features: 409`, and the intended
+3. Confirm `doctor` reports `ram_bytes: 2048`, `features: 415`, and the intended
    device. `play.env_id` must name the same level as `prepare.include_level`.
 4. Run headless on a server, or set `play.render = true` on a machine with a display.
    Set `play.record_video = true` to write `episode-000.mp4` inside the configured

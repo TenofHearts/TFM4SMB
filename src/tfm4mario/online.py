@@ -103,14 +103,24 @@ class OnlineReplay:
         self.episode_flushed_rows = 0
         self.episode_flushed_batches = 0
 
-    def observe(self, previous_ram, current_ram, action, after_ram, *, death=False):
+    def observe(
+        self,
+        previous_ram,
+        current_ram,
+        action,
+        after_ram,
+        *,
+        previous_action=0,
+        death=False,
+    ):
         if self.batch_start_ram is None:
             raise RuntimeError("begin_episode must be called before observe")
         previous = checked_ram(previous_ram).astype(np.uint8)
         current = checked_ram(current_ram).astype(np.uint8)
         after = checked_ram(after_ram).astype(np.uint8)
         action = validate_action(action)
-        self.pending.append((previous, current, action))
+        previous_action = validate_action(previous_action)
+        self.pending.append((previous, current, previous_action, action))
         self.last_after_ram = after
         self.last_progress_reference = self.progress_max
         transition_death = bool(death or _is_death_state(after))
@@ -179,11 +189,18 @@ class OnlineReplay:
         )
         X = np.stack(
             [
-                extract_features(current, previous, action_value=value)
-                for previous, current, _ in self.pending
+                extract_features(
+                    current,
+                    previous,
+                    previous_action=previous_action,
+                    action_value=value,
+                )
+                for previous, current, previous_action, _ in self.pending
             ]
         )
-        y = np.asarray([action for _, _, action in self.pending], dtype=np.int64)
+        y = np.asarray(
+            [action for _, _, _, action in self.pending], dtype=np.int64
+        )
         values = np.full(len(y), value, dtype=np.int8)
         self.context_X = np.concatenate((self.context_X, X))
         self.context_y = np.concatenate((self.context_y, y))

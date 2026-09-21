@@ -164,6 +164,7 @@ def rollout(
     started = time.perf_counter()
     rng = np.random.default_rng(seed)
     previous_ram = None
+    previous_action = 0
     initial_ram = get_ram(env)
     if online is not None:
         online.begin_episode(initial_ram)
@@ -174,6 +175,7 @@ def rollout(
         decision = policy.predict_ram(
             current_ram,
             previous_ram=previous_ram,
+            previous_action=previous_action,
             action_value=1,
             selection=action_selection,
             epsilon=epsilon,
@@ -199,9 +201,11 @@ def rollout(
                     before_step,
                     decision["action"],
                     after_step,
+                    previous_action=previous_action,
                     death=bool(info.get("death", False)),
                 )
             previous_ram = before_step
+            previous_action = decision["action"]
             reward_total += reward
             frames += 1
             if video is not None:
