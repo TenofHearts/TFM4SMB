@@ -12,19 +12,30 @@ from .dataset import _action_value, _is_death_state, _player_x, load_table
 from .features import FEATURE_NAMES, SCHEMA, checked_ram, extract_features
 
 
-ONLINE_SCHEMA = "tfm4mario-online-batch-context-v2"
+ONLINE_SCHEMA = "tfm4mario-online-batch-context-v3-progress-threshold"
 
 
 class OnlineReplay:
     """Label complete transition batches from their ending state."""
 
-    def __init__(self, policy, base_context: Path, path: Path, *, capacity=256):
-        if capacity < 1:
-            raise ValueError("online capacity must be positive")
+    def __init__(
+        self,
+        policy,
+        base_context: Path,
+        path: Path,
+        *,
+        capacity=256,
+        min_progress_delta=3,
+    ):
+        if capacity < 1 or min_progress_delta < 1:
+            raise ValueError(
+                "online capacity and minimum progress delta must be positive"
+            )
         self.policy = policy
         self.base_context = Path(base_context)
         self.path = Path(path)
         self.capacity = int(capacity)
+        self.min_progress_delta = int(min_progress_delta)
         self.base_X, self.base_y, self.base_metadata = load_table(self.base_context)
         self.context_X = np.empty((0, len(FEATURE_NAMES)), dtype=np.float32)
         self.context_y = np.empty(0, dtype=np.int64)
@@ -32,6 +43,8 @@ class OnlineReplay:
         self.pending = []
         self.batch_start_ram = None
         self.last_after_ram = None
+        self.progress_max = None
+        self.last_progress_reference = None
         self.episode_death = False
         self.episode_flushed_rows = 0
         self.episode_flushed_batches = 0
@@ -61,6 +74,7 @@ class OnlineReplay:
             or metadata.get("feature_names") != list(FEATURE_NAMES)
             or metadata.get("context") != self._context_identity()
             or metadata.get("batch_capacity") != self.capacity
+            or metadata.get("min_progress_delta") != self.min_progress_delta
             or X.shape != (len(y), len(FEATURE_NAMES))
             or values.shape != (len(y),)
         ):
@@ -83,6 +97,8 @@ class OnlineReplay:
         initial = checked_ram(initial_ram).astype(np.uint8)
         self.batch_start_ram = initial
         self.last_after_ram = initial
+        self.progress_max = _player_x(initial)
+        self.last_progress_reference = self.progress_max
         self.episode_death = False
         self.episode_flushed_rows = 0
         self.episode_flushed_batches = 0
@@ -96,10 +112,18 @@ class OnlineReplay:
         action = validate_action(action)
         self.pending.append((previous, current, action))
         self.last_after_ram = after
+        self.last_progress_reference = self.progress_max
         transition_death = bool(death or _is_death_state(after))
         self.episode_death = self.episode_death or transition_death
         if len(self.pending) == self.capacity:
-            return self._flush_pending(after, death=transition_death)
+            result = self._flush_pending(
+                after,
+                death=transition_death,
+                progress_reference=self.last_progress_reference,
+            )
+            self.progress_max = max(self.progress_max, _player_x(after))
+            return result
+        self.progress_max = max(self.progress_max, _player_x(after))
         return None
 
     def end_episode(self, *, death=False, refit=True):
@@ -107,9 +131,15 @@ class OnlineReplay:
             return None
         death = bool(death or self.episode_death)
         if self.pending:
-            self._flush_pending(self.last_after_ram, death=death)
+            self._flush_pending(
+                self.last_after_ram,
+                death=death,
+                progress_reference=self.last_progress_reference,
+            )
         self.batch_start_ram = None
         self.last_after_ram = None
+        self.progress_max = None
+        self.last_progress_reference = None
         self.episode_death = False
         should_refit = bool(refit and self.episode_flushed_rows)
         self.last_refit_seconds = self._refit() if should_refit else None
@@ -129,7 +159,7 @@ class OnlineReplay:
             "updates": self.updates,
         }
 
-    def _flush_pending(self, ending_ram, *, death):
+    def _flush_pending(self, ending_ram, *, death, progress_reference):
         """Assign one ending-state value to every action in the full cache."""
         if not self.pending:
             return None
@@ -140,10 +170,11 @@ class OnlineReplay:
             else _action_value(
                 self.batch_start_ram,
                 ending,
-                _player_x(self.batch_start_ram),
+                progress_reference,
                 effect_frame=0,
                 death_frame=None,
                 window=1,
+                min_progress_delta=self.min_progress_delta,
             )
         )
         X = np.stack(
@@ -179,6 +210,7 @@ class OnlineReplay:
             "feature_names": list(FEATURE_NAMES),
             "context": self._context_identity(),
             "batch_capacity": self.capacity,
+            "min_progress_delta": self.min_progress_delta,
             "rows": len(self.context_y),
             "flushed_batches": self.flushed_batches,
             "action_value_counts": dict(
@@ -218,6 +250,7 @@ class OnlineReplay:
             "enabled": True,
             "cache": str(self.path.resolve()),
             "batch_capacity": self.capacity,
+            "min_progress_delta": self.min_progress_delta,
             "pending_rows": len(self.pending),
             "accumulated_context_rows": len(self.context_y),
             "flushed_batches": self.flushed_batches,

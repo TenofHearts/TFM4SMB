@@ -265,7 +265,10 @@ frozen. The online cache first holds up to `adapt.online_capacity` adjacent RAM
 transitions without action-value labels. When the cache fills, its ending state
 assigns one delayed `-1/0/1` value to every action in that cache: death assigns
 `-1`; otherwise net new progress, score, or power-up gain assigns `1`; and no
-measured result assigns `0`. The labeled batch is appended permanently to the
+measured result assigns `0`. Progress assigns `+1` only when the batch endpoint
+advances by at least `adapt.online_min_progress_delta` pixels from the batch
+start **and** establishes a new episode-wide progress maximum. Recovering
+previously covered ground is therefore neutral. The labeled batch is appended permanently to the
 accumulated online context, written to `paths.online_cache`, and the now-empty
 cache accepts another batch. A partial final batch is labeled from the episode's
 ending state and flushed the same way.

@@ -58,6 +58,7 @@ action_repeat = 1
 action_selection = "epsilon_sample"
 epsilon = 0.30 # Uniform random action with this probability; otherwise sample the model.
 online_capacity = 16 # Unlabeled transitions per delayed-credit batch.
+online_min_progress_delta = 16 # Batch must advance >=16 pixels and end at a new episode maximum for +1.
 render = false
 record_video = true
 video_fps = 60

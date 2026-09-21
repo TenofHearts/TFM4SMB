@@ -140,6 +140,15 @@ def parser():
     adapt.add_argument("--context", type=Path)
     adapt.add_argument("--online-cache", type=Path)
     adapt.add_argument("--online-capacity", type=positive, default=256)
+    adapt.add_argument(
+        "--online-min-progress-delta",
+        type=positive,
+        default=3,
+        help=(
+            "Require this many pixels of advancement beyond the batch-start "
+            "milestone before labeling an online batch successful"
+        ),
+    )
     doctor = sub.add_parser(
         "doctor", help="Inspect compute and optionally exercise an emulator"
     )
@@ -270,6 +279,7 @@ def main():
                     args.context,
                     args.online_cache,
                     capacity=args.online_capacity,
+                    min_progress_delta=args.online_min_progress_delta,
                 )
 
             result = play(

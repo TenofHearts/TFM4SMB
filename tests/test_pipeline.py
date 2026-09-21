@@ -102,6 +102,7 @@ class ConfigTests(unittest.TestCase):
             config = Path(directory) / "config.toml"
             for content in ['[prepare]\nmax_rows=0',
                             '[adapt]\nepsilon=1.1',
+                            '[adapt]\nonline_min_progress_delta=0',
                             '[train]\nn_estimator=1',
                             '[play]\nrender="false"', '[prepare]\nlabel_offset=2']:
                 config.write_text(content)
@@ -557,7 +558,9 @@ class OnlineReplayTests(unittest.TestCase):
             context = self._context(root)
             policy = Policy()
             cache = root / "online.npz"
-            replay = OnlineReplay(policy, context, cache, capacity=3)
+            replay = OnlineReplay(
+                policy, context, cache, capacity=3, min_progress_delta=3
+            )
             initial = game_ram()
             replay.begin_episode(initial)
             current = initial.copy()
@@ -575,6 +578,8 @@ class OnlineReplayTests(unittest.TestCase):
             self.assertEqual(policy.refits, [])
             with np.load(cache, allow_pickle=False) as saved:
                 np.testing.assert_array_equal(saved["action_values"], [1, 1, 1])
+                metadata = json.loads(str(saved["metadata"]))
+                self.assertEqual(metadata["min_progress_delta"], 3)
 
             replay.observe(current, current, 16, current)
             replay.observe(current, current, 0, current)
@@ -592,6 +597,69 @@ class OnlineReplayTests(unittest.TestCase):
                 np.testing.assert_array_equal(
                     saved["action_values"], [1, 1, 1, 0, 0]
                 )
+
+    def test_online_progress_must_reach_configured_milestone_delta(self):
+        class Policy:
+            def refit_context(self, X, y):
+                return 0.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = self._context(root)
+            replay = OnlineReplay(
+                Policy(),
+                context,
+                root / "online.npz",
+                capacity=2,
+                min_progress_delta=3,
+            )
+            initial = game_ram()
+            replay.begin_episode(initial)
+            one_pixel = initial.copy()
+            one_pixel[0x86] += 1
+            replay.observe(initial, initial, 20, one_pixel)
+            two_pixels = initial.copy()
+            two_pixels[0x86] += 2
+            update = replay.observe(one_pixel, one_pixel, 20, two_pixels)
+            self.assertEqual(update["assigned_action_value"], 0)
+
+            three_pixels = initial.copy()
+            three_pixels[0x86] += 3
+            replay.observe(two_pixels, two_pixels, 20, three_pixels)
+            five_pixels = initial.copy()
+            five_pixels[0x86] += 5
+            update = replay.observe(three_pixels, three_pixels, 20, five_pixels)
+            self.assertEqual(update["assigned_action_value"], 1)
+
+    def test_online_progress_must_exceed_episode_milestone(self):
+        class Policy:
+            def refit_context(self, X, y):
+                return 0.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            replay = OnlineReplay(
+                Policy(),
+                self._context(root),
+                root / "online.npz",
+                capacity=2,
+                min_progress_delta=2,
+            )
+            initial = game_ram()
+            replay.begin_episode(initial)
+            five = initial.copy()
+            five[0x86] += 5
+            three = initial.copy()
+            three[0x86] += 3
+            replay.observe(initial, initial, 20, five)
+            update = replay.observe(five, five, 20, three)
+            self.assertEqual(update["assigned_action_value"], 0)
+
+            four = initial.copy()
+            four[0x86] += 4
+            replay.observe(three, three, 20, four)
+            update = replay.observe(four, four, 20, five)
+            self.assertEqual(update["assigned_action_value"], 0)
 
     def test_partial_cache_is_marked_at_episode_end_and_persists(self):
         class Policy:
