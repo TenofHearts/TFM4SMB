@@ -125,7 +125,7 @@ class Policy:
         previous_ram=None,
         previous_action=None,
         action_value=1,
-        selection="argmax",
+        selection="sample",
         epsilon=0.3,
         rng=None,
     ):
@@ -146,11 +146,10 @@ class Policy:
         )
         self._previous_ram = checked_ram(ram).astype(np.uint8)
         probabilities = self.model.predict_proba(features[None, :])[0]
-        greedy_index = int(np.argmax(probabilities))
-        max_confidence = float(probabilities[greedy_index])
+        max_confidence = float(np.max(probabilities))
         explored = False
         if selection == "argmax":
-            index = greedy_index
+            index = int(np.argmax(probabilities))
         elif selection == "sample":
             rng = np.random.default_rng() if rng is None else rng
             index = int(rng.choice(len(probabilities), p=probabilities))

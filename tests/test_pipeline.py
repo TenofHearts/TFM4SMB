@@ -2,11 +2,13 @@
 
 import io
 import json
+import os
 from contextlib import redirect_stderr
 from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -21,7 +23,7 @@ from tfm4mario.features import (
     tile_at,
 )
 from tfm4mario.game import rollout
-from tfm4mario.metadata_cache import build_cache
+from tfm4mario.metadata_cache import CACHE_SCHEMA, build_cache
 from tfm4mario.online import OnlineReplay
 from tfm4mario.policy import Policy as FittedPolicy
 from tfm4mario.ram import (
@@ -31,6 +33,8 @@ from tfm4mario.ram import (
     parse_frame,
     read_frame,
 )
+from tfm4mario.teacher import DATASET_ACTIONS, _preprocess, _write_shard
+from tfm4mario.teacher_data import prepare_teacher_decisions
 from tfm4mario.cli import parse_args
 
 
@@ -76,6 +80,10 @@ class RamTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_adapt_accepts_argmax_action_selection(self):
+        args = parse_args(["adapt", "--action-selection", "argmax"])
+        self.assertEqual(args.action_selection, "argmax")
+
     def test_shared_paths_resolve_relative_to_config_and_cli_wins(self):
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "config.toml"
@@ -110,6 +118,142 @@ class ConfigTests(unittest.TestCase):
                 config.write_text(content)
                 with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                     parse_args(["doctor", "--config", str(config)])
+
+
+class TeacherCollectionTests(unittest.TestCase):
+    def test_action_order_matches_simple_movement(self):
+        self.assertEqual(DATASET_ACTIONS, (0, 4, 132, 20, 148, 128, 32))
+
+    def test_preprocess_is_normalized_four_stack_frame(self):
+        image = np.zeros((240, 256, 3), dtype=np.uint8)
+        image[..., 0] = 255
+        processed = _preprocess(image)
+        self.assertEqual(processed.shape, (84, 84))
+        self.assertEqual(processed.dtype, np.float32)
+        np.testing.assert_allclose(processed, 76 / 255, atol=1e-6)
+
+    def test_teacher_shard_is_prepare_compatible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "teacher-cache"
+            cache.mkdir()
+            ram = np.stack([game_ram(), game_ram(), game_ram()])
+            ram[1, 0x86], ram[2, 0x86] = 4, 8
+            _write_shard(
+                cache,
+                {
+                    "ram": ram,
+                    "actions": np.asarray([0, 20, 148], dtype=np.uint8),
+                },
+                0,
+            )
+            (cache / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema": CACHE_SCHEMA,
+                        "outcome": "win",
+                        "ram_encoding": "raw",
+                        "complete": True,
+                        "shards": 1,
+                        "frames": 3,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            context = root / "context.npz"
+            metadata = prepare(
+                cache,
+                context,
+                outcome="win",
+                encoding="raw",
+                include_level="1-3",
+                max_rows=10,
+            )
+            self.assertEqual(metadata["trajectory_count"], 1)
+            self.assertEqual(metadata["levels"], ["1-3"])
+            with np.load(context, allow_pickle=False) as data:
+                np.testing.assert_array_equal(data["y"], [20, 148])
+
+    def test_decision_rows_include_reset_and_only_four_frame_boundaries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "teacher-cache"
+            cache.mkdir()
+            reset_ram = game_ram()
+            ram = np.stack([game_ram() for _ in range(12)])
+            ram[:, 0x86] = [1, 2, 3, 4, 4, 4, 4, 4, 5, 6, 7, 8]
+            actions = np.asarray([20] * 4 + [132] * 4 + [4] * 4, dtype=np.uint8)
+            _write_shard(
+                cache,
+                {"reset_ram": reset_ram, "ram": ram, "actions": actions},
+                0,
+            )
+            (cache / "manifest.json").write_text(
+                json.dumps({
+                    "schema": CACHE_SCHEMA, "complete": True,
+                    "source": "roclark/super-mario-bros-dqn",
+                    "environment": "SuperMarioBros-1-3-v0",
+                    "teacher_action_repeat": 4, "ram_encoding": "raw",
+                }),
+                encoding="utf-8",
+            )
+            output = root / "teacher-decisions.npz"
+            metadata = prepare_teacher_decisions(cache, output, value_mode="transition")
+            self.assertEqual(metadata["reset_state_rows"], 1)
+            with np.load(output, allow_pickle=False) as table:
+                np.testing.assert_array_equal(table["frames"], [0, 4, 8])
+                np.testing.assert_array_equal(table["y"], [20, 132, 4])
+                np.testing.assert_array_equal(table["previous_actions"], [0, 20, 132])
+                np.testing.assert_array_equal(table["action_values"], [1, 0, 1])
+                np.testing.assert_array_equal(
+                    table["X"][:, FEATURE_NAMES.index("desired_action_value")],
+                    [1, 0, 1],
+                )
+                self.assertEqual(table["X"].shape, (3, len(FEATURE_NAMES)))
+                self.assertEqual(
+                    table["X"][0, FEATURE_NAMES.index("previous_action_right")], 0
+                )
+                self.assertEqual(
+                    table["X"][1, FEATURE_NAMES.index("previous_action_right")], 1
+                )
+
+            positive_output = root / "teacher-decisions-positive.npz"
+            positive_metadata = prepare_teacher_decisions(
+                cache, positive_output, value_mode="trajectory-positive"
+            )
+            self.assertEqual(
+                positive_metadata["action_value_mode"], "trajectory-positive"
+            )
+            with np.load(positive_output, allow_pickle=False) as table:
+                np.testing.assert_array_equal(table["action_values"], [1, 1, 1])
+                np.testing.assert_array_equal(
+                    table["X"][:, FEATURE_NAMES.index("desired_action_value")],
+                    [1, 1, 1],
+                )
+
+            judged_output = root / "teacher-decisions-student-judge.npz"
+            judged_metadata = prepare_teacher_decisions(
+                cache,
+                judged_output,
+                value_mode="student-judge",
+                judge_horizon_frames=8,
+                judge_min_progress_delta=3,
+            )
+            self.assertIsNone(judged_metadata["judge_capacity"])
+            self.assertEqual(judged_metadata["judge_horizon_frames"], 8)
+            self.assertEqual(judged_metadata["death_lookback_actions"], 4)
+            self.assertEqual(judged_metadata["min_progress_delta"], 3)
+            with np.load(judged_output, allow_pickle=False) as table:
+                # Every action gets its own eight raw frames. Ordinary forward
+                # progress reward inside each horizon makes all three positive.
+                np.testing.assert_array_equal(table["action_values"], [1, 1, 1])
+
+    def test_teacher_policy_requires_matching_playback_repeat(self):
+        class TeacherPolicy:
+            manifest = {"context": {"teacher_action_repeat": 4}}
+
+        with self.assertRaisesRegex(ValueError, "action_repeat=4"):
+            rollout(None, TeacherPolicy(), action_repeat=1)
 
 
 class FeatureTests(unittest.TestCase):
@@ -496,13 +640,18 @@ class ActionAndRolloutTests(unittest.TestCase):
             policy.model.last_X[0, FEATURE_NAMES.index("previous_action_right")], 1
         )
 
-        policy.predict_ram(game_ram(), selection="argmax")
+        policy.predict_ram(
+            game_ram(), selection="sample", rng=np.random.default_rng(3)
+        )
         self.assertEqual(
             policy.model.last_X[0, FEATURE_NAMES.index("previous_action_B")], 1
         )
         self.assertEqual(
             policy.model.last_X[0, FEATURE_NAMES.index("previous_action_right")], 1
         )
+        decision = policy.predict_ram(game_ram(), selection="argmax")
+        self.assertEqual(decision["selection"], "argmax")
+        self.assertEqual(decision["action"], 20)
 
     def test_action_translation(self):
         self.assertEqual(button_names(148), ["A", "B", "right"])
@@ -542,8 +691,32 @@ class ActionAndRolloutTests(unittest.TestCase):
 
         env = Env()
         policy = Policy()
+        class Online:
+            def __init__(self):
+                self.observations = []
+
+            def begin_episode(self, initial_ram):
+                self.initial_ram = initial_ram.copy()
+
+            def observe(self, *args, **kwargs):
+                self.observations.append((args, kwargs))
+
+            def end_episode(self, **kwargs):
+                return kwargs
+
+            def summary(self):
+                return {"observations": len(self.observations)}
+
+        online = Online()
         trace = io.StringIO()
-        result = rollout(env, policy, max_frames=20, action_repeat=4, trace=trace)
+        result = rollout(
+            env,
+            policy,
+            max_frames=20,
+            action_repeat=4,
+            trace=trace,
+            online=online,
+        )
         self.assertEqual(env.actions, [131, 131])
         self.assertEqual(result["frames"], 2)
         self.assertEqual(result["decisions"], 1)
@@ -551,6 +724,9 @@ class ActionAndRolloutTests(unittest.TestCase):
         self.assertEqual(json.loads(trace.getvalue())["action"], 148)
         self.assertEqual(policy.previous, ["reset", None])
         self.assertEqual(policy.previous_actions, [0])
+        self.assertEqual(len(online.observations), 1)
+        self.assertEqual(online.observations[0][0][2], 148)
+        self.assertEqual(online.observations[0][1]["previous_action"], 0)
 
     def test_video_receives_initial_and_stepped_frames(self):
         class Env:
@@ -586,6 +762,31 @@ class ActionAndRolloutTests(unittest.TestCase):
 
 
 class OnlineReplayTests(unittest.TestCase):
+    def test_cache_write_retries_transient_windows_file_lock(self):
+        class Policy:
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "online.npz"
+            replay = OnlineReplay(Policy(), self._context(root), cache)
+            real_replace = os.replace
+            attempts = []
+
+            def replace(source, target):
+                attempts.append((source, target))
+                if len(attempts) == 1:
+                    raise PermissionError("temporary file lock")
+                real_replace(source, target)
+
+            with patch("tfm4mario.online.os.replace", side_effect=replace), patch(
+                "tfm4mario.online.time.sleep"
+            ):
+                replay._write()
+            self.assertEqual(len(attempts), 2)
+            with np.load(cache, allow_pickle=False) as saved:
+                self.assertEqual(len(saved["y"]), 0)
+
     def _context(self, root):
         data = root / "data"
         data.mkdir()
@@ -633,16 +834,16 @@ class OnlineReplayTests(unittest.TestCase):
                 current = after
                 previous_action = action
 
-            self.assertEqual(flushed["rows"], 3)
+            self.assertEqual(flushed["rows"], 1)
             self.assertEqual(flushed["assigned_action_value"], 1)
-            self.assertEqual(replay.summary()["pending_rows"], 0)
-            self.assertEqual(replay.summary()["accumulated_context_rows"], 3)
+            self.assertEqual(replay.summary()["pending_rows"], 2)
+            self.assertEqual(replay.summary()["accumulated_context_rows"], 1)
             self.assertEqual(policy.refits, [])
             with np.load(cache, allow_pickle=False) as saved:
-                np.testing.assert_array_equal(saved["action_values"], [1, 1, 1])
+                np.testing.assert_array_equal(saved["action_values"], [1])
                 np.testing.assert_array_equal(
                     saved["X"][:, FEATURE_NAMES.index("previous_action_B")],
-                    [0, 0, 1],
+                    [0],
                 )
                 metadata = json.loads(str(saved["metadata"]))
                 self.assertEqual(metadata["min_progress_delta"], 3)
@@ -651,17 +852,17 @@ class OnlineReplayTests(unittest.TestCase):
             replay.observe(current, current, 0, current)
             self.assertEqual(replay.summary()["pending_rows"], 2)
             self.assertEqual(policy.refits, [])
-            update = replay.end_episode()
+            update = replay.end_episode(success=True)
             self.assertTrue(update["refit_performed"])
             self.assertEqual(len(policy.refits), 1)
-            self.assertEqual(update["flushed_batches"], 2)
+            self.assertEqual(update["flushed_batches"], 4)
             self.assertEqual(update["accumulated_context_rows"], 5)
             np.testing.assert_array_equal(
                 policy.refits[0][1][-5:], [0, 16, 20, 16, 0]
             )
             with np.load(cache, allow_pickle=False) as saved:
                 np.testing.assert_array_equal(
-                    saved["action_values"], [1, 1, 1, 0, 0]
+                    saved["action_values"], [1, 0, 0, 0, 0]
                 )
 
     def test_online_progress_must_reach_configured_milestone_delta(self):
@@ -697,7 +898,27 @@ class OnlineReplayTests(unittest.TestCase):
             update = replay.observe(three_pixels, three_pixels, 20, five_pixels)
             self.assertEqual(update["assigned_action_value"], 1)
 
-    def test_online_progress_must_exceed_episode_milestone(self):
+    def test_any_positive_reward_in_actions_horizon_is_positive(self):
+        class Policy:
+            def refit_context(self, X, y):
+                return 0.0
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            replay = OnlineReplay(
+                Policy(), self._context(root), root / "online.npz", capacity=2
+            )
+            state = game_ram()
+            replay.begin_episode(state)
+            replay.observe(state, state, 0, state)
+            update = replay.observe(
+                state, state, 4, state, positive_reward=True
+            )
+            self.assertEqual(update["assigned_action_value"], 1)
+            with np.load(root / "online.npz", allow_pickle=False) as saved:
+                np.testing.assert_array_equal(saved["action_values"], [1])
+
+    def test_online_progress_is_relative_to_each_actions_start(self):
         class Policy:
             def refit_context(self, X, y):
                 return 0.0
@@ -719,13 +940,14 @@ class OnlineReplayTests(unittest.TestCase):
             three[0x86] += 3
             replay.observe(initial, initial, 20, five)
             update = replay.observe(five, five, 20, three)
-            self.assertEqual(update["assigned_action_value"], 0)
+            self.assertEqual(update["assigned_action_value"], 1)
 
             four = initial.copy()
             four[0x86] += 4
-            replay.observe(three, three, 20, four)
-            update = replay.observe(four, four, 20, five)
+            update = replay.observe(three, three, 20, four)
             self.assertEqual(update["assigned_action_value"], 0)
+            update = replay.observe(four, four, 20, five)
+            self.assertEqual(update["assigned_action_value"], 1)
 
     def test_partial_cache_is_marked_at_episode_end_and_persists(self):
         class Policy:
@@ -741,24 +963,34 @@ class OnlineReplayTests(unittest.TestCase):
             context = self._context(root)
             policy = Policy()
             cache = root / "online.npz"
-            replay = OnlineReplay(policy, context, cache, capacity=4)
+            replay = OnlineReplay(
+                policy, context, cache, capacity=16, death_lookback_actions=4
+            )
             initial = game_ram()
             replay.begin_episode(initial)
-            replay.observe(initial, initial, 20, initial)
+            for action in (0, 4, 20, 32, 128):
+                replay.observe(initial, initial, action, initial)
             replay.observe(initial, initial, 148, initial, death=True)
             self.assertEqual(policy.refits, [])
             update = replay.end_episode(death=True)
             self.assertEqual(len(policy.refits), 1)
-            self.assertEqual(update["accumulated_context_rows"], 2)
-            self.assertEqual(update["action_value_counts"], {-1: 2})
+            self.assertEqual(update["accumulated_context_rows"], 4)
+            self.assertEqual(update["action_value_counts"], {-1: 4})
             with np.load(cache, allow_pickle=False) as saved:
-                self.assertEqual(saved["X"].shape, (2, len(FEATURE_NAMES)))
-                np.testing.assert_array_equal(saved["action_values"], [-1, -1])
+                self.assertEqual(saved["X"].shape, (4, len(FEATURE_NAMES)))
+                np.testing.assert_array_equal(saved["y"], [20, 32, 128, 148])
+                np.testing.assert_array_equal(saved["action_values"], [-1] * 4)
 
             restored_policy = Policy()
-            restored = OnlineReplay(restored_policy, context, cache, capacity=4)
+            restored = OnlineReplay(
+                restored_policy,
+                context,
+                cache,
+                capacity=16,
+                death_lookback_actions=4,
+            )
             self.assertEqual(len(restored_policy.refits), 1)
-            self.assertEqual(restored.summary()["accumulated_context_rows"], 2)
+            self.assertEqual(restored.summary()["accumulated_context_rows"], 4)
 
     def test_context_is_not_refit_after_final_episode(self):
         class Policy:
@@ -777,7 +1009,7 @@ class OnlineReplayTests(unittest.TestCase):
             initial = game_ram()
             replay.begin_episode(initial)
             replay.observe(initial, initial, 20, initial)
-            update = replay.end_episode(refit=False)
+            update = replay.end_episode(success=True, refit=False)
             self.assertFalse(update["refit_performed"])
             self.assertEqual(policy.refits, [])
             self.assertEqual(update["accumulated_context_rows"], 1)

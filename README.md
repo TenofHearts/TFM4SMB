@@ -61,6 +61,75 @@ python data_selection.py
 uv run tfm4mario prepare
 ```
 
+### Collect demonstrations from the pretrained 1-3 teacher
+
+The optional teacher collector is deliberately separate from the configured
+pipeline. It does not read or change the `[prepare]`, `[train]`, `[play]`, or
+`[adapt]` settings. Supply every teacher-specific path on the command line:
+
+```powershell
+uv run python -m tfm4mario.teacher `
+  --checkpoint artifacts/teacher/SuperMarioBros-1-3-v0.dat `
+  --output artifacts/teacher-data-1-3-aligned `
+  --trajectories 3
+```
+
+The checkpoint is the published `SuperMarioBros-1-3-v0.dat` model from
+[`roclark/super-mario-bros-dqn`](https://github.com/roclark/super-mario-bros-dqn).
+It is loaded with PyTorch's restricted weights-only loader. The collector uses
+the checkpoint's fixed four-frame repeat and seven-action `SIMPLE_MOVEMENT`
+contract, and records reset RAM plus RAM and the applied action after every raw
+emulator frame. Only flag-reaching trajectories enter the output cache, and an
+exact duplicate action sequence is rejected. The default 0.01 exploration rate
+exists to obtain distinct demonstrations from an otherwise deterministic policy;
+failed attempts are reported in `manifest.json`, not included as training data.
+
+Train the student on the teacher's decision points. This includes the reset
+state and first action; each later row uses RAM after frames 4, 8, 12, and so
+on to predict the next four-frame action. Each teacher decision gets its own
+rolling 16-raw-frame future window. Any positive Mario reward component in that
+window, including ordinary progress, or at least 16 pixels of endpoint advance
+labels the action `+1`. The live online judge uses the same rolling rule.
+Death labels the most recent four actions `-1` by default. Live prediction
+requests `+1` to select
+actions associated with useful future outcomes. Keep episode 002 held out:
+
+For the whole-trajectory-positive ablation, add
+`--value-mode trajectory-positive`. This assigns `+1` to every decision in each
+accepted winning teacher trajectory while preserving the same reset and
+four-frame decision alignment. Use `--value-mode transition` for the earlier
+per-decision four-frame rule.
+
+```powershell
+uv run python -m tfm4mario.teacher_data `
+  --data artifacts/teacher-data-1-3-aligned `
+  --output artifacts/teacher-rolling-reward-train.npz `
+  --episode pretrained-dqn-1-3-000 `
+  --episode pretrained-dqn-1-3-001
+uv run python -m tfm4mario.teacher_data `
+  --data artifacts/teacher-data-1-3-aligned `
+  --output artifacts/teacher-rolling-reward-eval.npz `
+  --episode pretrained-dqn-1-3-002
+uv run tfm4mario train `
+  --context artifacts/teacher-rolling-reward-train.npz `
+  --output artifacts/teacher-rolling-reward-policy
+uv run tfm4mario evaluate `
+  --model artifacts/teacher-rolling-reward-policy `
+  --data artifacts/teacher-rolling-reward-eval.npz
+uv run tfm4mario play `
+  --model artifacts/teacher-rolling-reward-policy `
+  --env-id SuperMarioBros-1-3-v0 `
+  --output artifacts/teacher-rolling-reward-video `
+  --action-repeat 4 --action-selection epsilon_sample --epsilon 0.30 `
+  --max-frames 1800 --record-video
+```
+
+Use fresh output paths for later runs. The teacher-trained policy requires
+`--action-repeat 4` at playback; the game refuses a mismatched repeat. The
+Both `play` and `adapt` accept `--action-selection argmax`; `adapt` refits the
+policy between episodes while selecting the highest-scoring action each time.
+Keep these teacher rows separate from the persistent online cache.
+
 The extraction reads and validates each PNG once, then stores RAM, action, frame
 identity, and outcome in one compressed `.npz` shard per episode under
 `processed_data/metadata_cache`. It stores no image pixels.
@@ -249,10 +318,9 @@ decision = policy.predict_ram(ram_bytes, action_value=1)  # tracks its last acti
 The emulator waits while TabPFN predicts, so slow inference makes gameplay slower
 in wall-clock time rather than dropping actions. Default action repeat is one.
 `--action-repeat 4` deliberately changes the control policy; it is an experiment,
-not a transparent speed optimization. Probability-based modes avoid the argmax
-failure in which an ambiguous state repeatedly selects the modal wait action and
-never changes. Set `play.action_selection = "argmax"` only for a deterministic
-mode-policy comparison. Each episode writes a decision JSONL trace
+not a transparent speed optimization. Student control always uses probability
+sampling, avoiding the failure in which an ambiguous state repeatedly selects
+one modal action and never changes. Each episode writes a decision JSONL trace
 and summary with completion flag, progress, reward, stop reason and p50/p95
 prediction latency. A recorded video uses emulator frames at `play.video_fps`, so
 slow model inference does not create pauses in the MP4. Repeated resets may be deterministic; multiple identical
@@ -267,20 +335,15 @@ the emulator and policy together, headless.
 ## Between-episode online adaptation
 
 `adapt` is a separate experimental mode. Within each episode the policy stays
-frozen. The online cache first holds up to `adapt.online_capacity` adjacent RAM
-transitions without action-value labels. When the cache fills, its ending state
-assigns one delayed `-1/0/1` value to every action in that cache: death assigns
-`-1`; otherwise net new progress, score, or power-up gain assigns `1`; and no
-measured result assigns `0`. Progress assigns `+1` only when the batch endpoint
-advances by at least `adapt.online_min_progress_delta` pixels from the batch
-start **and** establishes a new episode-wide progress maximum. Recovering
-previously covered ground is therefore neutral. The labeled batch is appended permanently to the
-accumulated online context, written to `paths.online_cache`, and the now-empty
-cache accepts another batch. A partial final batch is labeled from the episode's
-ending state and flushed the same way.
+frozen. Each pending action waits `adapt.online_capacity` raw frames for its own
+rolling judgment. Any positive environment reward in that interval or endpoint
+advance of at least `adapt.online_min_progress_delta` pixels labels it `+1`.
+Otherwise it receives `0`. Death overrides the most recent
+`adapt.online_death_lookback_actions` actions with `-1`. Resolved rows are
+written to `paths.online_cache`; unresolved actions at a frame limit are dropped.
 
-No refit occurs when a batch is flushed. At episode end, TabPFN is refit once on
-the original prepared context plus every accumulated online batch, so those new
+No refit occurs when actions resolve. At episode end, TabPFN is refit once on
+the original prepared context plus every accumulated online action, so those new
 rows are first used by the next episode. The saved base policy is never
 overwritten. The final episode persists its rows but skips an unnecessary refit;
 a later invocation loads and applies that accumulated context before episode one.

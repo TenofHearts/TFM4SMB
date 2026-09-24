@@ -66,6 +66,61 @@ def _action_value(
     return int(useful_progress or score_gain or powerup_gain)
 
 
+def _future_action_value(
+    before,
+    after,
+    progress_reference,
+    *,
+    death=False,
+    min_progress_delta=1,
+):
+    """Judge a delayed action batch from its start and future endpoint."""
+    if death:
+        return -1
+    return _action_value(
+        before,
+        after,
+        progress_reference,
+        effect_frame=0,
+        death_frame=None,
+        window=1,
+        min_progress_delta=min_progress_delta,
+    )
+
+
+def _positive_reward_event(before, after, progress_max, *, completion=False):
+    """Return whether one raw frame produced any positive Mario reward component."""
+    before_x = _player_x(before)
+    after_x = _player_x(after)
+    progress = after_x - progress_max
+    progress_reward = 0 < progress <= 5
+    score_reward = _decimal_counter(after, 0x7DE, 6) > _decimal_counter(
+        before, 0x7DE, 6
+    )
+    coins_before = _decimal_counter(before, 0x7ED, 2)
+    coins_after = _decimal_counter(after, 0x7ED, 2)
+    coin_reward = coins_after > coins_before or coins_before - coins_after > 50
+    powerup_reward = int(after[0x756]) > int(before[0x756])
+    return bool(
+        progress_reward or score_reward or coin_reward or powerup_reward or completion
+    )
+
+
+def _rolling_action_value(
+    before,
+    after,
+    *,
+    positive_reward=False,
+    death=False,
+    min_progress_delta=16,
+):
+    """Judge one action from its own fixed future horizon."""
+    if death:
+        return -1
+    progress = _player_x(after) - _player_x(before) >= min_progress_delta
+    return int(bool(positive_reward) or progress)
+
+
 def _select_trajectory_rows(candidates, max_rows, rng):
     """Keep action changes, then sample round-robin across trajectory IDs."""
     availability = Counter(

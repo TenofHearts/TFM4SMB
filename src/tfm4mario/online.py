@@ -4,19 +4,20 @@ from collections import Counter
 import json
 import os
 from pathlib import Path
+import time
 
 import numpy as np
 
 from .actions import validate_action
-from .dataset import _action_value, _is_death_state, _player_x, load_table
+from .dataset import _is_death_state, _rolling_action_value, load_table
 from .features import FEATURE_NAMES, SCHEMA, checked_ram, extract_features
 
 
-ONLINE_SCHEMA = "tfm4mario-online-batch-context-v3-progress-threshold"
+ONLINE_SCHEMA = "tfm4mario-online-rolling-context-v5-per-action-frame-horizon"
 
 
 class OnlineReplay:
-    """Label complete transition batches from their ending state."""
+    """Label each action independently after a fixed raw-frame horizon."""
 
     def __init__(
         self,
@@ -26,25 +27,24 @@ class OnlineReplay:
         *,
         capacity=256,
         min_progress_delta=3,
+        death_lookback_actions=4,
     ):
-        if capacity < 1 or min_progress_delta < 1:
+        if capacity < 1 or min_progress_delta < 1 or death_lookback_actions < 1:
             raise ValueError(
-                "online capacity and minimum progress delta must be positive"
+                "online horizon, progress delta, and death lookback must be positive"
             )
         self.policy = policy
         self.base_context = Path(base_context)
         self.path = Path(path)
         self.capacity = int(capacity)
+        self.death_lookback_actions = int(death_lookback_actions)
         self.min_progress_delta = int(min_progress_delta)
         self.base_X, self.base_y, self.base_metadata = load_table(self.base_context)
         self.context_X = np.empty((0, len(FEATURE_NAMES)), dtype=np.float32)
         self.context_y = np.empty(0, dtype=np.int64)
         self.context_values = np.empty(0, dtype=np.int8)
         self.pending = []
-        self.batch_start_ram = None
         self.last_after_ram = None
-        self.progress_max = None
-        self.last_progress_reference = None
         self.episode_death = False
         self.episode_flushed_rows = 0
         self.episode_flushed_batches = 0
@@ -73,7 +73,9 @@ class OnlineReplay:
             or metadata.get("feature_schema") != SCHEMA
             or metadata.get("feature_names") != list(FEATURE_NAMES)
             or metadata.get("context") != self._context_identity()
-            or metadata.get("batch_capacity") != self.capacity
+            or metadata.get("horizon_frames") != self.capacity
+            or metadata.get("horizon_unit") != "raw_frames"
+            or metadata.get("death_lookback_actions") != self.death_lookback_actions
             or metadata.get("min_progress_delta") != self.min_progress_delta
             or X.shape != (len(y), len(FEATURE_NAMES))
             or values.shape != (len(y),)
@@ -95,10 +97,7 @@ class OnlineReplay:
         if self.pending:
             raise RuntimeError("Previous online cache was not flushed")
         initial = checked_ram(initial_ram).astype(np.uint8)
-        self.batch_start_ram = initial
         self.last_after_ram = initial
-        self.progress_max = _player_x(initial)
-        self.last_progress_reference = self.progress_max
         self.episode_death = False
         self.episode_flushed_rows = 0
         self.episode_flushed_batches = 0
@@ -112,44 +111,70 @@ class OnlineReplay:
         *,
         previous_action=0,
         death=False,
+        elapsed_frames=1,
+        positive_reward=False,
     ):
-        if self.batch_start_ram is None:
+        if self.last_after_ram is None:
             raise RuntimeError("begin_episode must be called before observe")
+        if elapsed_frames < 1:
+            raise ValueError("elapsed_frames must be positive")
         previous = checked_ram(previous_ram).astype(np.uint8)
         current = checked_ram(current_ram).astype(np.uint8)
         after = checked_ram(after_ram).astype(np.uint8)
         action = validate_action(action)
         previous_action = validate_action(previous_action)
-        self.pending.append((previous, current, previous_action, action))
+        self.pending.append({
+            "previous": previous,
+            "current": current,
+            "previous_action": previous_action,
+            "action": action,
+            "elapsed_frames": 0,
+            "positive_reward": False,
+        })
+        for item in self.pending:
+            item["elapsed_frames"] += int(elapsed_frames)
+            item["positive_reward"] = bool(
+                item["positive_reward"] or positive_reward
+            )
         self.last_after_ram = after
-        self.last_progress_reference = self.progress_max
         transition_death = bool(death or _is_death_state(after))
         self.episode_death = self.episode_death or transition_death
-        if len(self.pending) == self.capacity:
-            result = self._flush_pending(
-                after,
-                death=transition_death,
-                progress_reference=self.last_progress_reference,
-            )
-            self.progress_max = max(self.progress_max, _player_x(after))
-            return result
-        self.progress_max = max(self.progress_max, _player_x(after))
-        return None
+        if transition_death:
+            split = max(0, len(self.pending) - self.death_lookback_actions)
+            mature = [
+                item for item in self.pending[:split]
+                if item["elapsed_frames"] >= self.capacity
+            ]
+            negative = self.pending[split:]
+            self.pending.clear()
+            results = []
+            if mature:
+                results.append(self._commit(mature, after))
+            if negative:
+                results.append(self._commit(negative, after, forced_value=-1))
+            return self._merge_results(results)
+        mature_count = 0
+        for item in self.pending:
+            if item["elapsed_frames"] < self.capacity:
+                break
+            mature_count += 1
+        if not mature_count:
+            return None
+        mature = self.pending[:mature_count]
+        del self.pending[:mature_count]
+        return self._commit(mature, after)
 
-    def end_episode(self, *, death=False, refit=True):
-        if self.batch_start_ram is None:
+    def end_episode(self, *, death=False, success=False, refit=True):
+        if self.last_after_ram is None:
             return None
         death = bool(death or self.episode_death)
-        if self.pending:
-            self._flush_pending(
-                self.last_after_ram,
-                death=death,
-                progress_reference=self.last_progress_reference,
-            )
-        self.batch_start_ram = None
+        if self.pending and death:
+            negative = self.pending[-self.death_lookback_actions:]
+            self._commit(negative, self.last_after_ram, forced_value=-1)
+        elif self.pending and success:
+            self._commit(self.pending, self.last_after_ram)
+        self.pending.clear()
         self.last_after_ram = None
-        self.progress_max = None
-        self.last_progress_reference = None
         self.episode_death = False
         should_refit = bool(refit and self.episode_flushed_rows)
         self.last_refit_seconds = self._refit() if should_refit else None
@@ -169,45 +194,36 @@ class OnlineReplay:
             "updates": self.updates,
         }
 
-    def _flush_pending(self, ending_ram, *, death, progress_reference):
-        """Assign one ending-state value to every action in the full cache."""
-        if not self.pending:
+    def _commit(self, entries, ending_ram, *, forced_value=None):
+        """Commit resolved rolling actions using their shared current endpoint."""
+        if not entries:
             return None
         ending = checked_ram(ending_ram).astype(np.uint8)
-        value = (
-            -1
-            if death
-            else _action_value(
-                self.batch_start_ram,
+        values = np.asarray([
+            forced_value if forced_value is not None else _rolling_action_value(
+                item["current"],
                 ending,
-                progress_reference,
-                effect_frame=0,
-                death_frame=None,
-                window=1,
+                positive_reward=item["positive_reward"],
                 min_progress_delta=self.min_progress_delta,
             )
-        )
+            for item in entries
+        ], dtype=np.int8)
         X = np.stack(
             [
                 extract_features(
-                    current,
-                    previous,
-                    previous_action=previous_action,
-                    action_value=value,
+                    item["current"],
+                    item["previous"],
+                    previous_action=item["previous_action"],
+                    action_value=int(value),
                 )
-                for previous, current, previous_action, _ in self.pending
+                for item, value in zip(entries, values, strict=True)
             ]
         )
-        y = np.asarray(
-            [action for _, _, _, action in self.pending], dtype=np.int64
-        )
-        values = np.full(len(y), value, dtype=np.int8)
+        y = np.asarray([item["action"] for item in entries], dtype=np.int64)
         self.context_X = np.concatenate((self.context_X, X))
         self.context_y = np.concatenate((self.context_y, y))
         self.context_values = np.concatenate((self.context_values, values))
-        flushed_rows = len(self.pending)
-        self.pending.clear()
-        self.batch_start_ram = ending
+        flushed_rows = len(entries)
         self.episode_flushed_rows += flushed_rows
         self.episode_flushed_batches += 1
         self.flushed_batches += 1
@@ -215,8 +231,24 @@ class OnlineReplay:
         self._write()
         return {
             "rows": flushed_rows,
-            "assigned_action_value": value,
+            "assigned_action_values": values.tolist(),
+            "assigned_action_value": (
+                int(values[0]) if np.all(values == values[0]) else None
+            ),
             "accumulated_context_rows": len(self.context_y),
+        }
+
+    @staticmethod
+    def _merge_results(results):
+        results = [result for result in results if result is not None]
+        if not results:
+            return None
+        values = [value for result in results for value in result["assigned_action_values"]]
+        return {
+            "rows": sum(result["rows"] for result in results),
+            "assigned_action_values": values,
+            "assigned_action_value": values[0] if len(set(values)) == 1 else None,
+            "accumulated_context_rows": results[-1]["accumulated_context_rows"],
         }
 
     def _write(self):
@@ -226,7 +258,9 @@ class OnlineReplay:
             "feature_schema": SCHEMA,
             "feature_names": list(FEATURE_NAMES),
             "context": self._context_identity(),
-            "batch_capacity": self.capacity,
+            "horizon_frames": self.capacity,
+            "horizon_unit": "raw_frames",
+            "death_lookback_actions": self.death_lookback_actions,
             "min_progress_delta": self.min_progress_delta,
             "rows": len(self.context_y),
             "flushed_batches": self.flushed_batches,
@@ -244,7 +278,14 @@ class OnlineReplay:
                 action_values=self.context_values,
                 metadata=np.asarray(json.dumps(metadata)),
             )
-        os.replace(temporary, self.path)
+        for attempt in range(8):
+            try:
+                os.replace(temporary, self.path)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.1 * (2 ** attempt))
 
     def _context_identity(self):
         return {
@@ -255,6 +296,9 @@ class OnlineReplay:
             "min_progress_delta": self.base_metadata.get("min_progress_delta"),
             "stride": self.base_metadata.get("stride"),
             "seed": self.base_metadata.get("seed"),
+            "action_value_mode": self.base_metadata.get("action_value_mode"),
+            "teacher_action_repeat": self.base_metadata.get("teacher_action_repeat"),
+            "judge_horizon_frames": self.base_metadata.get("judge_horizon_frames"),
         }
 
     def _refit(self):
@@ -266,7 +310,8 @@ class OnlineReplay:
         return {
             "enabled": True,
             "cache": str(self.path.resolve()),
-            "batch_capacity": self.capacity,
+            "horizon_frames": self.capacity,
+            "death_lookback_actions": self.death_lookback_actions,
             "min_progress_delta": self.min_progress_delta,
             "pending_rows": len(self.pending),
             "accumulated_context_rows": len(self.context_y),

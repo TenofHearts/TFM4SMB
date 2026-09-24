@@ -135,7 +135,7 @@ def parser():
         command.add_argument("--action-repeat", type=positive, default=1)
         command.add_argument(
             "--action-selection",
-            choices=["sample", "argmax", "epsilon_sample"],
+            choices=["sample", "epsilon_sample", "argmax"],
             default="sample",
         )
         command.add_argument("--epsilon", type=probability, default=0.3)
@@ -151,12 +151,18 @@ def parser():
     play = sub.add_parser("play", help="Run a frozen-policy Mario rollout")
     add_game_arguments(play, default_episodes=1)
     adapt = sub.add_parser(
-        "adapt", help="Run batch-delayed collection and between-episode refits"
+        "adapt", help="Run rolling delayed-credit collection and between-episode refits"
     )
     add_game_arguments(adapt, default_episodes=5)
     adapt.add_argument("--context", type=Path)
     adapt.add_argument("--online-cache", type=Path)
-    adapt.add_argument("--online-capacity", type=positive, default=256)
+    adapt.add_argument(
+        "--online-capacity",
+        type=positive,
+        default=16,
+        help="Raw-frame future horizon used independently for every action",
+    )
+    adapt.add_argument("--online-death-lookback-actions", type=positive, default=4)
     adapt.add_argument(
         "--online-min-progress-delta",
         type=positive,
@@ -303,6 +309,7 @@ def main():
                     args.online_cache,
                     capacity=args.online_capacity,
                     min_progress_delta=args.online_min_progress_delta,
+                    death_lookback_actions=args.online_death_lookback_actions,
                 )
 
             result = play(

@@ -151,6 +151,12 @@ def rollout(
 ):
     if max_frames < 1 or action_repeat < 1:
         raise ValueError("max_frames/action_repeat must be positive")
+    context = getattr(policy, "manifest", {}).get("context", {})
+    teacher_repeat = context.get("teacher_action_repeat")
+    if teacher_repeat is not None and action_repeat != teacher_repeat:
+        raise ValueError(
+            f"This teacher-trained policy requires action_repeat={teacher_repeat}"
+        )
     info = reset_env(env, seed)
     if hasattr(policy, "reset_history"):
         policy.reset_history()
@@ -184,35 +190,44 @@ def rollout(
         latencies.append(decision["predict_seconds"])
         decisions += 1
         exploratory_decisions += int(decision.get("explored", False))
-        # Never add a silent frameskip: the context's targets are per-frame.
+        decision_previous_ram = current_ram if previous_ram is None else previous_ram
+        decision_previous_action = previous_action
+        decision_death = False
+        decision_positive_reward = False
+        after_step = current_ram
+        decision_frames = 0
         for _ in range(min(action_repeat, max_frames - frames)):
             # Preserve the state immediately before the last emulated step.  At
             # the next decision it is exactly one frame behind current RAM even
             # when action_repeat is greater than one.
             before_step = get_ram(env)
-            history_ram = before_step if previous_ram is None else previous_ram
             reward, terminated, truncated, info = step_env(
                 env, to_nes_action(decision["action"])
             )
             after_step = get_ram(env)
-            if online is not None:
-                online.observe(
-                    history_ram,
-                    before_step,
-                    decision["action"],
-                    after_step,
-                    previous_action=previous_action,
-                    death=bool(info.get("death", False)),
-                )
             previous_ram = before_step
-            previous_action = decision["action"]
+            decision_death = decision_death or bool(info.get("death", False))
+            decision_positive_reward = decision_positive_reward or reward > 0
             reward_total += reward
             frames += 1
+            decision_frames += 1
             if video is not None:
                 video.write(env.render())
             flag_get = flag_get or bool(info.get("flag_get", False))
             if terminated or truncated or flag_get:
                 break
+        if online is not None:
+            online.observe(
+                decision_previous_ram,
+                current_ram,
+                decision["action"],
+                after_step,
+                previous_action=decision_previous_action,
+                death=decision_death,
+                elapsed_frames=decision_frames,
+                positive_reward=decision_positive_reward,
+            )
+        previous_action = decision["action"]
         if trace is not None:
             trace.write(
                 json.dumps(
@@ -231,6 +246,7 @@ def rollout(
     if online is not None:
         online_update = online.end_episode(
             death=bool(info.get("death", False) or _is_death_ram(get_ram(env))),
+            success=flag_get,
             refit=online_refit,
         )
     result = {
